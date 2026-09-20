@@ -1,0 +1,19 @@
+# SwiftPM and packaged builds
+.build/
+.swiftpm/
+dist/
+
+# Local macOS and editor state
+.DS_Store
+*.xcuserstate
+xcuserdata/
+
+# Local screenshots
+.codex-ui-*.png
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
