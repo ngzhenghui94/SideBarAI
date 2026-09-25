@@ -44,6 +44,12 @@ struct OMPAccountIdentity: Equatable, Sendable {
     }
 }
 
+struct OMPModelUsageReport: Sendable {
+    let summaries: [ModelUsageSummary]
+    let unattributedRequestCount: Int
+    let pricing: ModelPricingCatalog?
+}
+
 actor OMPModelUsageSource {
     static let lookbackInterval: TimeInterval = 30 * 24 * 60 * 60
     static let lookbackLabel = "last 30 days"
@@ -63,28 +69,39 @@ actor OMPModelUsageSource {
         self.cacheLifetime = cacheLifetime.isFinite && cacheLifetime > 0 ? cacheLifetime : 0
     }
 
-    func summaries(
+    func report(
         for identity: OMPAccountIdentity,
         now: Date = Date()
-    ) -> [ModelUsageSummary] {
-        guard let credentialPinHash = identity.credentialPinHash else { return [] }
+    ) -> OMPModelUsageReport {
+        let credentialPinHash = identity.credentialPinHash
+        let provider = identity.provider.lowercased()
 
         refreshEvents()
         let cutoff = now.addingTimeInterval(-Self.lookbackInterval)
         var grouped: [String: ModelUsageAccumulator] = [:]
         var order: [String] = []
+        var unattributedRequestCount = 0
         for fileURL in sessionOrder {
             guard let session = cachedSessions[fileURL] else { continue }
-            for event in session.events where event.credentialPinHash == credentialPinHash
+            for event in session.events where event.provider == provider
                 && event.timestamp >= cutoff && event.timestamp <= now {
+                guard let eventPin = event.credentialPinHash else {
+                    unattributedRequestCount += 1
+                    continue
+                }
+                guard eventPin == credentialPinHash else { continue }
                 if grouped[event.modelID] == nil {
                     grouped[event.modelID] = ModelUsageAccumulator()
                     order.append(event.modelID)
                 }
-                grouped[event.modelID]?.add(event.usage)
+                grouped[event.modelID]?.add(event)
             }
         }
-        return order.compactMap { grouped[$0]?.summary(modelID: $0) }
+        return OMPModelUsageReport(
+            summaries: order.compactMap { grouped[$0]?.summary(modelID: $0) },
+            unattributedRequestCount: unattributedRequestCount,
+            pricing: ModelPricingCatalog(ompProvider: provider)
+        )
     }
 
     private static func defaultSessionsDirectory() -> URL {
@@ -136,6 +153,7 @@ actor OMPModelUsageSource {
     private static func parseEvents(_ data: Data, decoder: JSONDecoder) -> [OMPPinnedModelUsageEvent] {
         var events: [OMPPinnedModelUsageEvent] = []
         var pinsByProvider: [String: String] = [:]
+        var serviceTier: CodexServiceTier = .standard
         for line in data.split(whereSeparator: { $0 == 0x0A }) {
             guard let entry = try? decoder.decode(OMPSessionEntry.self, from: line) else { continue }
             if entry.type == "credential_pin" {
@@ -144,10 +162,14 @@ actor OMPModelUsageSource {
                 pinsByProvider[provider.lowercased()] = hash.lowercased()
                 continue
             }
+            if entry.type == "service_tier_change" {
+                serviceTier = entry.serviceTier ?? .unsupported
+                continue
+            }
             if entry.type == "model_usage",
                let event = makeEvent(
                    provider: entry.provider, modelID: entry.model, usage: entry.usage,
-                   timestamp: entry.timestamp?.date, pinsByProvider: pinsByProvider
+                   timestamp: entry.timestamp?.date, serviceTier: serviceTier, pinsByProvider: pinsByProvider
                ) {
                 events.append(event)
                 continue
@@ -157,7 +179,7 @@ actor OMPModelUsageSource {
             if let event = makeEvent(
                 provider: message.provider, modelID: message.model, usage: message.usage,
                 timestamp: message.timestamp?.date ?? entry.timestamp?.date,
-                pinsByProvider: pinsByProvider
+                serviceTier: serviceTier, pinsByProvider: pinsByProvider
             ) {
                 events.append(event)
             }
@@ -170,21 +192,23 @@ actor OMPModelUsageSource {
         modelID: String?,
         usage: OMPTokenUsagePayload?,
         timestamp: Date?,
+        serviceTier: CodexServiceTier,
         pinsByProvider: [String: String]
     ) -> OMPPinnedModelUsageEvent? {
         guard let provider = normalized(provider),
               let modelID = normalized(modelID),
               let usage,
-              let timestamp,
-              let credentialPinHash = pinsByProvider[provider.lowercased()] else {
+              let timestamp else {
             return nil
         }
 
         return OMPPinnedModelUsageEvent(
-            credentialPinHash: credentialPinHash,
+            provider: provider.lowercased(),
+            credentialPinHash: pinsByProvider[provider.lowercased()],
             modelID: modelID,
             timestamp: timestamp,
-            usage: usage
+            usage: usage,
+            serviceTier: serviceTier
         )
     }
 
@@ -228,10 +252,12 @@ private struct SessionFileStamp: Equatable {
 }
 
 private struct OMPPinnedModelUsageEvent: Sendable {
-    let credentialPinHash: String
+    let provider: String
+    let credentialPinHash: String?
     let modelID: String
     let timestamp: Date
     let usage: OMPTokenUsagePayload
+    let serviceTier: CodexServiceTier
 }
 
 private struct ModelUsageAccumulator: Sendable {
@@ -245,7 +271,8 @@ private struct ModelUsageAccumulator: Sendable {
     private var hasCompleteCost = true
     private var isValid = true
 
-    mutating func add(_ usage: OMPTokenUsagePayload) {
+    mutating func add(_ event: OMPPinnedModelUsageEvent) {
+        let usage = event.usage
         let (nextRequestCount, requestOverflow) = requestCount.addingReportingOverflow(1)
         guard !requestOverflow else {
             isValid = false
@@ -273,7 +300,7 @@ private struct ModelUsageAccumulator: Sendable {
         cacheWriteTokens = nextCacheWriteTokens
         totalTokens = nextTotalTokens
 
-        if let cost = usage.estimatedCostValue {
+        if let cost = usage.estimatedCost(provider: event.provider, modelID: event.modelID, serviceTier: event.serviceTier) {
             let nextEstimatedCost = estimatedCost + cost
             guard nextEstimatedCost.isFinite, nextEstimatedCost >= 0 else {
                 isValid = false
@@ -312,6 +339,7 @@ private struct OMPSessionEntry: Decodable, Sendable {
     let hash: String?
     let usage: OMPTokenUsagePayload?
     let message: OMPHistoryMessage?
+    let serviceTier: CodexServiceTier?
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -321,6 +349,7 @@ private struct OMPSessionEntry: Decodable, Sendable {
         case hash
         case usage
         case message
+        case serviceTier
     }
 
     init(from decoder: Decoder) throws {
@@ -336,6 +365,9 @@ private struct OMPSessionEntry: Decodable, Sendable {
         hash = try? container.decode(String.self, forKey: .hash)
         usage = try? container.decode(OMPTokenUsagePayload.self, forKey: .usage)
         message = try? container.decode(OMPHistoryMessage.self, forKey: .message)
+        serviceTier = type == "service_tier_change"
+            ? (try? container.decode(OMPServiceTierSelection.self, forKey: .serviceTier))?.value ?? .unsupported
+            : nil
     }
 }
 
@@ -387,7 +419,6 @@ private struct OMPTokenUsagePayload: Decodable, Sendable {
     let cacheRead: FlexibleDouble?
     let cacheWrite: FlexibleDouble?
     let totalTokens: FlexibleDouble?
-    let cost: OMPCostPayload?
 
     private enum CodingKeys: String, CodingKey {
         case input
@@ -395,7 +426,6 @@ private struct OMPTokenUsagePayload: Decodable, Sendable {
         case cacheRead
         case cacheWrite
         case totalTokens
-        case cost
     }
 
     init(from decoder: Decoder) throws {
@@ -405,7 +435,6 @@ private struct OMPTokenUsagePayload: Decodable, Sendable {
         cacheRead = try? container.decode(FlexibleDouble.self, forKey: .cacheRead)
         cacheWrite = try? container.decode(FlexibleDouble.self, forKey: .cacheWrite)
         totalTokens = try? container.decode(FlexibleDouble.self, forKey: .totalTokens)
-        cost = try? container.decode(OMPCostPayload.self, forKey: .cost)
     }
 
     var inputValue: Double { nonNegative(input?.value) }
@@ -420,25 +449,26 @@ private struct OMPTokenUsagePayload: Decodable, Sendable {
         return inputValue + outputValue + cacheReadValue + cacheWriteValue
     }
 
-    var estimatedCostValue: Double? {
-        if let total = cost?.total?.value,
-           total.isFinite,
-           total >= 0 {
-            return total
+    func estimatedCost(provider: String, modelID: String, serviceTier: CodexServiceTier) -> Double? {
+        // A total alone cannot distinguish expensive output from discounted cached input.
+        guard let pricing = ModelPricingCatalog(ompProvider: provider),
+              let input = input?.value, let output = output?.value,
+              let cacheRead = cacheRead?.value, let cacheWrite = cacheWrite?.value else { return nil }
+        let componentTotal = input + output + cacheRead + cacheWrite
+        if let totalTokens, totalTokens.value != componentTotal { return nil }
+        switch pricing {
+        case .openAICodex:
+            return CodexModelPricing.estimate(
+                modelID: modelID, input: input, output: output,
+                cacheRead: cacheRead, cacheWrite: cacheWrite, serviceTier: serviceTier
+            )
+        case .anthropic:
+            // OMP's service tier records only OpenAI speed; Claude assumes standard speed.
+            return ClaudeModelPricing.estimate(
+                modelID: modelID, input: input, output: output,
+                cacheRead: cacheRead, cacheWrite: cacheWrite
+            )
         }
-
-        guard let input = cost?.input?.value,
-              let output = cost?.output?.value,
-              let cacheRead = cost?.cacheRead?.value,
-              let cacheWrite = cost?.cacheWrite?.value,
-              input.isFinite, input >= 0,
-              output.isFinite, output >= 0,
-              cacheRead.isFinite, cacheRead >= 0,
-              cacheWrite.isFinite, cacheWrite >= 0 else {
-            return nil
-        }
-        let total = input + output + cacheRead + cacheWrite
-        return total.isFinite && total >= 0 ? total : nil
     }
 
     private func nonNegative(_ value: Double?) -> Double {
@@ -447,27 +477,21 @@ private struct OMPTokenUsagePayload: Decodable, Sendable {
     }
 }
 
-private struct OMPCostPayload: Decodable, Sendable {
-    let input: FlexibleDouble?
-    let output: FlexibleDouble?
-    let cacheRead: FlexibleDouble?
-    let cacheWrite: FlexibleDouble?
-    let total: FlexibleDouble?
+private struct OMPServiceTierSelection: Decodable {
+    let value: CodexServiceTier
 
-    private enum CodingKeys: String, CodingKey {
-        case input
-        case output
-        case cacheRead
-        case cacheWrite
-        case total
-    }
+    private enum CodingKeys: String, CodingKey { case openai }
 
     init(from decoder: Decoder) throws {
+        if try decoder.singleValueContainer().decodeNil() {
+            value = .standard
+            return
+        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        input = try? container.decode(FlexibleDouble.self, forKey: .input)
-        output = try? container.decode(FlexibleDouble.self, forKey: .output)
-        cacheRead = try? container.decode(FlexibleDouble.self, forKey: .cacheRead)
-        cacheWrite = try? container.decode(FlexibleDouble.self, forKey: .cacheWrite)
-        total = try? container.decode(FlexibleDouble.self, forKey: .total)
+        switch try container.decodeIfPresent(String.self, forKey: .openai) {
+        case nil, "default", "standard": value = .standard
+        case "priority", "fast": value = .fast
+        default: value = .unsupported
+        }
     }
 }

@@ -45,20 +45,20 @@ private func codexLegacyEmail(from auth: CodexAuthFile?) -> String? {
 private struct CodexTokenMetadata: Sendable {
     let accountID: String?
     let email: String?
+    var subscriptionActiveUntil: Date? = nil
 
     static func from(auth: CodexAuthFile?) -> CodexTokenMetadata {
         let tokens = [auth?.tokens?.idToken, auth?.tokens?.accessToken].compactMap { $0 }
         var accountID: String?
         var email: String?
+        var activeUntil: Date?
         for token in tokens {
             let metadata = from(token: token)
             accountID = accountID ?? metadata.accountID
             email = email ?? metadata.email
-            if accountID != nil, email != nil {
-                break
-            }
+            activeUntil = activeUntil ?? metadata.subscriptionActiveUntil
         }
-        return CodexTokenMetadata(accountID: accountID, email: email)
+        return CodexTokenMetadata(accountID: accountID, email: email, subscriptionActiveUntil: activeUntil)
     }
 
     private static func from(token: String) -> CodexTokenMetadata {
@@ -96,7 +96,11 @@ private struct CodexTokenMetadata: Sendable {
             in: objects,
             keys: ["email", "user_email"]
         )
-        return CodexTokenMetadata(accountID: accountID, email: email)
+        // ChatGPT stamps the paid-through date into the ID token at login/refresh.
+        let activeUntil = UsageDateParser.iso8601(
+            firstString(in: objects, keys: ["chatgpt_subscription_active_until"])
+        )
+        return CodexTokenMetadata(accountID: accountID, email: email, subscriptionActiveUntil: activeUntil)
     }
 
     private static func firstString(in objects: [[String: Any]], keys: [String]) -> String? {
@@ -378,9 +382,12 @@ struct CodexUsageAdapter: UsageProviderAdapter {
                 updatedAt: Date(),
                 accountLabel: account.accountLabel ?? account.email ?? accountID.map { "Account \($0)" },
                 planLabel: nonEmpty(response.planType) ?? account.planLabel,
+                subscriptionRenewsAt: CodexTokenMetadata.from(auth: auth).subscriptionActiveUntil,
                 sourceLabel: "Codex CLI OAuth",
                 savedResetCount: ompSnapshot?.savedResetCount,
-                modelUsage: ompSnapshot?.modelUsage ?? []
+                modelUsage: ompSnapshot?.modelUsage ?? [],
+                unattributedModelRequestCount: ompSnapshot?.unattributedModelRequestCount ?? 0,
+                modelPricing: ompSnapshot?.modelPricing
             )
             return .usage(snapshot)
         } catch is CancellationError {

@@ -55,8 +55,17 @@ actor OMPUsageSource {
             return nil
         }
         guard let identity = report.accountIdentity else { return snapshot }
-        let modelUsage = await modelUsageSource.summaries(for: identity)
+        let modelUsage = await modelUsageSource.report(for: identity)
         return snapshot.withModelUsage(modelUsage)
+    }
+
+    /// Claude Code OAuth exposes no account identity, so local OMP history is attached
+    /// only when OMP has exactly one Anthropic account; otherwise ownership is ambiguous.
+    func anthropicModelUsage() async -> OMPModelUsageReport? {
+        guard let reports = try? await reports() else { return nil }
+        let anthropic = reports.filter { $0.provider.caseInsensitiveCompare("anthropic") == .orderedSame }
+        guard anthropic.count == 1, let identity = anthropic[0].accountIdentity else { return nil }
+        return await modelUsageSource.report(for: identity)
     }
 }
 

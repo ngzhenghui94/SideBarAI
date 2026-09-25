@@ -68,6 +68,12 @@ struct UsageCardView: View {
                         .foregroundStyle(record.provider.accentColor)
                 }
 
+                if let label = record.state.snapshot?.subscriptionRenewalLabel() {
+                    Text(label)
+                        .font(SideBarTheme.caption)
+                        .foregroundStyle(SideBarTheme.secondaryText)
+                }
+
                 Text(sourceLabel)
                     .font(SideBarTheme.caption)
                     .foregroundStyle(SideBarTheme.secondaryText)
@@ -124,9 +130,9 @@ struct UsageCardView: View {
                 ForEach(snapshot.windows) { window in
                     UsageWindowRow(window: window, accent: record.provider.accentColor)
                 }
-                if !snapshot.modelUsage.isEmpty {
+                if snapshot.hasModelUsage {
                     ModelUsageSummaryView(
-                        modelUsage: snapshot.modelUsage,
+                        snapshot: snapshot,
                         accent: record.provider.accentColor
                     )
                 }
@@ -284,38 +290,37 @@ private struct UsageWindowRow: View {
 }
 @MainActor
 private struct ModelUsageSummaryView: View {
-    let modelUsage: [ModelUsageSummary]
+    let snapshot: UsageSnapshot
     let accent: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Divider()
-                .overlay(SideBarTheme.border)
+            Divider().overlay(SideBarTheme.border)
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Model usage · \(OMPModelUsageSource.lookbackLabel)")
+                    Text("Local OMP usage · \(OMPModelUsageSource.lookbackLabel)")
                         .font(SideBarTheme.caption.weight(.semibold))
                         .foregroundStyle(SideBarTheme.secondaryText)
                     Text(tokenSummary)
                         .font(SideBarTheme.caption)
                         .foregroundStyle(SideBarTheme.mutedText)
                 }
-
                 Spacer(minLength: 4)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Estimated API cost")
-                        .font(SideBarTheme.caption)
-                        .foregroundStyle(SideBarTheme.mutedText)
-                    Text(costSummary)
-                        .font(SideBarTheme.caption.weight(.semibold))
-                        .foregroundStyle(estimatedCost == nil ? SideBarTheme.mutedText : accent)
-                        .monospacedDigit()
+                if !snapshot.modelUsage.isEmpty {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(snapshot.hasUnpricedModelUsage ? "Priced subtotal" : (snapshot.modelPricing?.estimateLabel ?? "Estimate"))
+                            .font(SideBarTheme.caption)
+                            .foregroundStyle(SideBarTheme.mutedText)
+                        Text(costSummary)
+                            .font(SideBarTheme.caption.weight(.semibold))
+                            .foregroundStyle(snapshot.pricedModelCost == nil ? SideBarTheme.mutedText : accent)
+                            .monospacedDigit()
+                    }
                 }
             }
 
-            ForEach(modelUsage) { usage in
+            ForEach(snapshot.modelUsage) { usage in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(usage.modelID)
@@ -323,15 +328,13 @@ private struct ModelUsageSummaryView: View {
                             .foregroundStyle(SideBarTheme.primaryText)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Text(requestLabel(usage.requestCount))
+                        Text("\(usage.requestCount) \(usage.requestCount == 1 ? "request" : "requests")")
                             .font(SideBarTheme.caption)
                             .foregroundStyle(SideBarTheme.mutedText)
                     }
-
                     Spacer(minLength: 4)
-
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(tokenLabel(usage.totalTokens))
+                        Text(UsageNumberFormatter.compactTokenString(usage.totalTokens).map { "\($0) tokens" } ?? "Tokens unavailable")
                             .font(SideBarTheme.caption)
                             .foregroundStyle(SideBarTheme.secondaryText)
                             .monospacedDigit()
@@ -341,53 +344,53 @@ private struct ModelUsageSummaryView: View {
                                 .font(SideBarTheme.caption)
                                 .foregroundStyle(accent)
                                 .monospacedDigit()
+                        } else {
+                            Text("Cost unavailable")
+                                .font(SideBarTheme.caption)
+                                .foregroundStyle(SideBarTheme.mutedText)
                         }
                     }
                 }
             }
 
-            if modelUsage.contains(where: { $0.estimatedCost == nil }) {
-                Text("Some records have no pricing data.")
+            if snapshot.hasUnpricedModelUsage {
+                Text("Subtotal excludes models without published rates or usable token/speed data.")
                     .font(SideBarTheme.caption)
                     .foregroundStyle(SideBarTheme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if snapshot.unattributedModelRequestCount > 0 {
+                Text("\(snapshot.unattributedModelRequestCount) provider-wide records excluded; account ownership is unknown.")
+                    .font(SideBarTheme.caption)
+                    .foregroundStyle(SideBarTheme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let pricing = snapshot.modelPricing {
+                Link(pricing.rateLinkTitle, destination: pricing.sourceURL)
+                    .font(SideBarTheme.caption)
+                Text(pricing.assumptions + " Partial local OMP history, not your subscription bill.")
+                    .font(SideBarTheme.caption)
+                    .foregroundStyle(SideBarTheme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .accessibilityElement(children: .combine)
-    }
-
-    private var estimatedCost: Double? {
-        guard modelUsage.allSatisfy({ $0.estimatedCost != nil }) else { return nil }
-        let total = modelUsage.compactMap(\.estimatedCost).reduce(0, +)
-        return total.isFinite && total >= 0 ? total : nil
+        .accessibilityElement(children: .contain)
     }
 
     private var tokenSummary: String {
-        let total = modelUsage.reduce(0) { $0 + $1.totalTokens }
-        guard total.isFinite,
-              total >= 0,
+        guard let total = snapshot.totalModelTokens,
               let formatted = UsageNumberFormatter.compactTokenString(total) else {
-            return "Token total unavailable · \(modelUsage.count) models"
+            return "No account-linked model totals available."
         }
-        return "\(formatted) tokens · \(modelUsage.count) models"
+        let count = snapshot.modelUsage.count
+        return "\(formatted) tokens incl. cached input · \(count) \(count == 1 ? "model" : "models")"
     }
 
     private var costSummary: String {
-        guard let estimatedCost,
-              let formatted = UsageNumberFormatter.currencyString(estimatedCost) else {
-            return "Unavailable"
-        }
+        guard let cost = snapshot.pricedModelCost,
+              let formatted = UsageNumberFormatter.currencyString(cost) else { return "Unavailable" }
         return "≈ \(formatted)"
-    }
-
-    private func tokenLabel(_ value: Double) -> String {
-        guard let formatted = UsageNumberFormatter.compactTokenString(value) else {
-            return "Tokens unavailable"
-        }
-        return "\(formatted) tokens"
-    }
-
-    private func requestLabel(_ count: Int) -> String {
-        "\(count) \(count == 1 ? "request" : "requests")"
     }
 }
 

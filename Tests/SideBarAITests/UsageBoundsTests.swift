@@ -191,8 +191,9 @@ struct UsageBoundsTests {
         try Data(otherSession.utf8).write(to: root.appendingPathComponent("other.jsonl"))
 
         let source = OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 0)
-        let summaries = await source.summaries(for: identity, now: now)
-
+        let report = await source.report(for: identity, now: now)
+        let summaries = report.summaries
+        #expect(report.unattributedRequestCount == 0)
         #expect(summaries.count == 1)
         guard let summary = summaries.first else {
             Issue.record("Expected one recent model summary")
@@ -204,7 +205,7 @@ struct UsageBoundsTests {
         #expect(summary.outputTokens == 30)
         #expect(summary.cacheReadTokens == 5)
         #expect(summary.totalTokens == 185)
-        #expect(abs((summary.estimatedCost ?? -1) - 0.465) < 0.000001)
+        #expect(abs((summary.estimatedCost ?? -1) - 0.0016525) < 0.000000001)
         let ompData = """
         {"reports":[{"provider":"openai-codex","fetchedAt":\(currentTimestamp),"limits":[{"id":"primary","label":"Primary","amount":{"used":10,"limit":100,"unit":"percent"}}],"metadata":{"email":"owner@example.com","accountId":"account-123","orgId":"org-123"}}]}
         """
@@ -224,9 +225,279 @@ struct UsageBoundsTests {
             Issue.record("Expected OMP usage to include model summaries")
             return
         }
-        #expect(integratedSnapshot.modelUsage == summaries)
-        #expect(abs((integratedSnapshot.estimatedCost ?? -1) - 0.465) < 0.000001)
+        #expect(integratedSnapshot.modelUsage == report.summaries)
+        #expect(integratedSnapshot.unattributedModelRequestCount == report.unattributedRequestCount)
+        #expect(abs((integratedSnapshot.estimatedCost ?? -1) - 0.0016525) < 0.000000001)
     }
+
+    @Test
+    func modelUsageKeepsRecentUnpinnedRequestsSeparateFromCredentialPins() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SideBarAI-model-attribution-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let identity = OMPAccountIdentity(provider: "openai-codex", accountID: "target")
+        let otherIdentity = OMPAccountIdentity(provider: "openai-codex", accountID: "other")
+        let unmatchedIdentity = OMPAccountIdentity(provider: "openai-codex", accountID: "unmatched")
+        guard let identityHash = identity.credentialPinHash,
+              let otherIdentityHash = otherIdentity.credentialPinHash else {
+            Issue.record("Expected credential pin hashes")
+            return
+        }
+
+        let records = [
+            ompMessage(modelID: "before-pin", timestamp: now.addingTimeInterval(-1), usage: #"{"input":4}"#),
+            """
+            {"type":"credential_pin","provider":"openai-codex","hash":"\(identityHash)"}
+            """,
+            ompMessage(modelID: "matched", timestamp: now, usage: #"{"input":7}"#),
+            ompMessage(modelID: "old", timestamp: now.addingTimeInterval(-31 * 24 * 60 * 60), usage: #"{"input":11}"#),
+            ompMessage(modelID: "future", timestamp: now.addingTimeInterval(1), usage: #"{"input":13}"#),
+            ompMessage(provider: "anthropic", modelID: "other-provider", timestamp: now, usage: #"{"input":17}"#)
+        ].joined(separator: "\n")
+        try Data(records.utf8).write(to: root.appendingPathComponent("target.jsonl"))
+
+        let otherAccountRecord = [
+            """
+            {"type":"credential_pin","provider":"openai-codex","hash":"\(otherIdentityHash)"}
+            """,
+            ompMessage(modelID: "other-account", timestamp: now, usage: #"{"input":19}"#)
+        ].joined(separator: "\n")
+        try Data(otherAccountRecord.utf8).write(to: root.appendingPathComponent("other.jsonl"))
+
+        let source = OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 0)
+        let report = await source.report(for: identity, now: now)
+        #expect(report.summaries.map(\.modelID) == ["matched"])
+        #expect(report.summaries.first?.inputTokens == 7)
+        #expect(report.unattributedRequestCount == 1)
+
+        let unmatchedReport = await source.report(for: unmatchedIdentity, now: now)
+        #expect(unmatchedReport.summaries.isEmpty)
+        #expect(unmatchedReport.unattributedRequestCount == 1)
+    }
+
+    @Test
+    func modelUsageRepricesSavedAmountsAndKeepsUnpriceableModelsOutOfSubtotal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SideBarAI-pricing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let identity = OMPAccountIdentity(provider: "openai-codex", accountID: "pricing")
+        let pin = try #require(identity.credentialPinHash)
+        let records = [
+            """
+            {"type":"credential_pin","provider":"openai-codex","hash":"\(pin)"}
+            """,
+            ompMessage(modelID: "gpt-6-astra", timestamp: now, usage: #"{"input":1000,"output":100,"cacheRead":2000,"cacheWrite":50,"totalTokens":3150,"cost":{"total":0}}"#),
+            ompMessage(modelID: "gpt-6-astra", timestamp: now, usage: #"{"input":1000,"output":100,"cacheRead":2000,"cacheWrite":50,"totalTokens":3150,"cost":{"total":999}}"#),
+            ompMessage(modelID: "gpt-6-luna", timestamp: now, usage: #"{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0}"#),
+            ompMessage(modelID: "gpt-5.3-codex-spark", timestamp: now, usage: #"{"input":100,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":110,"cost":{"total":0.5}}"#),
+            ompMessage(modelID: "gpt-5.6-sol", timestamp: now, usage: #"{"totalTokens":50,"cost":{"total":0.25}}"#),
+            ompMessage(modelID: "gpt-5.6-luna", timestamp: now, usage: #"{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}"#),
+            ompMessage(modelID: "gpt-5.6-luna", timestamp: now, usage: #"{"input":9,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":0}"#)
+        ].joined(separator: "\n")
+        try Data(records.utf8).write(to: root.appendingPathComponent("session.jsonl"))
+        let report = await OMPModelUsageSource(sessionsDirectory: root).report(for: identity, now: now)
+        let astra = try #require(report.summaries.first { $0.modelID == "gpt-6-astra" })
+        #expect(abs((astra.estimatedCost ?? -1) - 0.034) < 1e-12)
+        #expect(astra.totalTokens == 6_300)
+        #expect(astra.cacheReadTokens == 4_000)
+        #expect(report.summaries.first { $0.modelID == "gpt-6-luna" }?.estimatedCost == 0)
+        #expect(report.summaries.first { $0.modelID == "gpt-5.3-codex-spark" }?.estimatedCost == nil)
+        #expect(report.summaries.first { $0.modelID == "gpt-5.6-sol" }?.estimatedCost == nil)
+        #expect(report.summaries.first { $0.modelID == "gpt-5.6-luna" }?.estimatedCost == nil)
+        let snapshot = UsageSnapshot(windows: [], updatedAt: now, accountLabel: nil, planLabel: nil, sourceLabel: "fixture")
+            .withModelUsage(report)
+        #expect(snapshot.estimatedCost == nil)
+        #expect(abs((snapshot.pricedModelCost ?? -1) - 0.034) < 1e-12)
+    }
+
+    @Test
+    func modelUsageAppliesServiceTierChangesWithinEachSession() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("SideBarAI-tiers-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let identity = OMPAccountIdentity(provider: "openai-codex", accountID: "tiers")
+        let pin = try #require(identity.credentialPinHash)
+        let header = """
+        {"type":"credential_pin","provider":"openai-codex","hash":"\(pin)"}
+        """
+        let usage = #"{"input":1000,"output":100,"cacheRead":2000,"cacheWrite":50,"totalTokens":3150,"cost":{"total":999}}"#
+        let astra = ompMessage(modelID: "gpt-6-astra", timestamp: now, usage: usage)
+        let records = [header, astra,
+            #"{"type":"service_tier_change","serviceTier":{"openai":"priority"}}"#, astra,
+            #"{"type":"service_tier_change","serviceTier":null}"#, astra,
+            #"{"type":"service_tier_change","serviceTier":{"openai":"unrecognized"}}"#,
+            ompMessage(modelID: "gpt-5.6-sol", timestamp: now, usage: usage),
+            #"{"type":"service_tier_change","serviceTier":{"openai":"fast"}}"#, astra
+        ].joined(separator: "\n")
+        try Data(records.utf8).write(to: root.appendingPathComponent("first.jsonl"))
+        try Data((header + "\n" + astra).utf8).write(to: root.appendingPathComponent("second.jsonl"))
+        let report = await OMPModelUsageSource(sessionsDirectory: root).report(for: identity, now: now)
+        let summary = try #require(report.summaries.first { $0.modelID == "gpt-6-astra" })
+        #expect(summary.requestCount == 5)
+        #expect(abs((summary.estimatedCost ?? -1) - 0.136) < 1e-12)
+        #expect(report.summaries.first { $0.modelID == "gpt-5.6-sol" }?.estimatedCost == nil)
+    }
+
+    @Test
+    func codexRatesSeparateCachedInputAndExcludeCacheWriteCharges() throws {
+        let cost = try #require(CodexModelPricing.estimate(
+            modelID: "gpt-6-astra", input: 1_000, output: 100,
+            cacheRead: 2_000, cacheWrite: 5_000, serviceTier: .standard
+        ))
+        #expect(abs(cost - 0.017) < 1e-12)
+    }
+
+    @Test
+    func codexLongContextIncludesCachedPromptAndExemptsAstra() throws {
+        let boundary = try #require(CodexModelPricing.estimate(
+            modelID: "gpt-5.6-sol", input: 1_000, output: 100,
+            cacheRead: 271_000, cacheWrite: 0, serviceTier: .standard
+        ))
+        let long = try #require(CodexModelPricing.estimate(
+            modelID: "gpt-5.6-sol", input: 1_000, output: 100,
+            cacheRead: 271_001, cacheWrite: 0, serviceTier: .standard
+        ))
+        let astra = try #require(CodexModelPricing.estimate(
+            modelID: "gpt-6-astra", input: 1_000, output: 100,
+            cacheRead: 271_001, cacheWrite: 0, serviceTier: .standard
+        ))
+        #expect(abs(boundary - 0.1144) < 1e-12)
+        #expect(abs(long - 0.2278008) < 1e-12)
+        #expect(abs(astra - 0.286001) < 1e-12)
+    }
+
+    @Test
+    func codexFastMultipliersFollowTheProductRatherThanAPIPrice() throws {
+        let luna = try #require(CodexModelPricing.estimate(
+            modelID: "gpt-5.6-luna", input: 1_000, output: 500,
+            cacheRead: 200, cacheWrite: 0, serviceTier: .fast
+        ))
+        let older = try #require(CodexModelPricing.estimate(
+            modelID: "gpt-5.4", input: 1_000, output: 500,
+            cacheRead: 200, cacheWrite: 0, serviceTier: .fast
+        ))
+        #expect(abs(luna - 0.00201) < 1e-12)
+        #expect(abs(older - 0.0201) < 1e-12)
+    }
+
+    @Test
+    func codexPricingRejectsUnpublishedModelsTiersAndInvalidCounts() {
+        #expect(CodexModelPricing.estimate(modelID: "gpt-5.3-codex-spark", input: 100, output: 10,
+            cacheRead: 0, cacheWrite: 0, serviceTier: .standard) == nil)
+        #expect(CodexModelPricing.estimate(modelID: "gpt-5.3-codex", input: 100, output: 10,
+            cacheRead: 0, cacheWrite: 0, serviceTier: .fast) == nil)
+        #expect(CodexModelPricing.estimate(modelID: "gpt-6-astra", input: -1, output: 10,
+            cacheRead: 0, cacheWrite: 0, serviceTier: .standard) == nil)
+        #expect(CodexModelPricing.estimate(modelID: "gpt-6-astra", input: 100, output: .infinity,
+            cacheRead: 0, cacheWrite: 0, serviceTier: .standard) == nil)
+    }
+
+    @Test
+    func claudeRatesPriceCacheSeparatelyAndRejectUnlistedModels() throws {
+        // Opus 5.5 cache hits are 0.05x input, not the usual 0.1x.
+        let opus = try #require(ClaudeModelPricing.estimate(
+            modelID: "claude-opus-5-5", input: 1_000, output: 500, cacheRead: 10_000, cacheWrite: 2_000
+        ))
+        let datedHaiku = try #require(ClaudeModelPricing.estimate(
+            modelID: "claude-haiku-4-5-20251001", input: 1_000, output: 100, cacheRead: 0, cacheWrite: 0
+        ))
+        #expect(abs(opus - 0.026) < 1e-12)
+        #expect(abs(datedHaiku - 0.0015) < 1e-12)
+        #expect(ClaudeModelPricing.estimate(modelID: "claude-sonnet-5-5", input: 100, output: 10,
+            cacheRead: 0, cacheWrite: 0) == nil)
+    }
+
+    @Test
+    func ompUsageSourceCarriesUnattributedRequestsWithoutMatchedModels() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SideBarAI-omp-unattributed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = Date()
+        let timestamp = Int(now.timeIntervalSince1970 * 1_000)
+        let event = ompMessage(modelID: "unassigned", timestamp: now, usage: #"{"input":21,"totalTokens":21}"#)
+        try Data(event.utf8).write(to: root.appendingPathComponent("unassigned.jsonl"))
+
+        let ompData = """
+        {"reports":[{"provider":"openai-codex","fetchedAt":\(timestamp),"limits":[{"id":"primary","label":"Primary","amount":{"used":10,"limit":100,"unit":"percent"}}],"metadata":{"email":"owner@example.com","accountId":"account-123","orgId":"org-123"}}]}
+        """
+        let account = CodexAccount(
+            accountKey: "active",
+            accountLabel: "owner@example.com",
+            email: "owner@example.com",
+            isActive: true,
+            chatgptAccountID: "account-123"
+        )
+        let source = OMPUsageSource(
+            runner: FixtureUsageCommandRunner(data: Data(ompData.utf8)),
+            modelUsageSource: OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 0),
+            cacheLifetime: 0
+        )
+
+        guard let snapshot = await source.snapshot(for: account) else {
+            Issue.record("Expected a snapshot from the fixture runner")
+            return
+        }
+        #expect(snapshot.modelUsage.isEmpty)
+        #expect(snapshot.unattributedModelRequestCount == 1)
+        #expect(snapshot.hasModelUsage)
+        #expect(snapshot.modelUsageDetail != nil)
+        #expect(snapshot.estimatedCost == nil)
+    }
+
+    @Test
+    func consolidatedCodexUsesMaximumUnattributedCountAndRetainsUnknownCost() {
+        let makeRecord = { (id: String, unattributedCount: Int, summary: ModelUsageSummary) in
+            ProviderRecord(
+                recordID: id,
+                provider: .chatgpt,
+                state: .usage(UsageSnapshot(
+                    windows: [UsageWindow(
+                        id: "primary",
+                        label: "Primary",
+                        used: 10,
+                        limit: 100,
+                        unit: .percent,
+                        resetDate: nil,
+                        providerReportedPercentage: true
+                    )],
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    accountLabel: id,
+                    planLabel: "plus",
+                    sourceLabel: "fixture",
+                    modelUsage: [summary],
+                    unattributedModelRequestCount: unattributedCount
+                ))
+            )
+        }
+        let priced = ModelUsageSummary(
+            modelID: "gpt-5.5", requestCount: 1, inputTokens: 3, outputTokens: 0,
+            cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 3, estimatedCost: 0.25
+        )
+        let unpriced = ModelUsageSummary(
+            modelID: "gpt-5.5", requestCount: 1, inputTokens: 0, outputTokens: 0,
+            cacheReadTokens: 5, cacheWriteTokens: 0, totalTokens: 5, estimatedCost: nil
+        )
+        let records = [makeRecord("one", 3, priced), makeRecord("two", 7, unpriced)]
+
+        guard case let .usage(snapshot) = ProviderRecord.consolidatedCodexPresentation(records).first?.state else {
+            Issue.record("Expected consolidated usage")
+            return
+        }
+        #expect(snapshot.unattributedModelRequestCount == 7)
+        #expect(snapshot.modelUsage.count == 1)
+        #expect(snapshot.modelUsage.first?.inputTokens == 3)
+        #expect(snapshot.modelUsage.first?.cacheReadTokens == 5)
+        #expect(snapshot.modelUsage.first?.estimatedCost == nil)
+        #expect(snapshot.estimatedCost == nil)
+    }
+
 
     @Test
     func consolidatedResetCountsDoNotOverflow() {
@@ -337,16 +608,16 @@ struct UsageBoundsTests {
         }
         try Data((header + event(10)).utf8).write(to: file)
         let source = OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 0)
-        #expect(await source.summaries(for: first, now: now).first?.totalTokens == 10)
+        #expect(await source.report(for: first, now: now).summaries.first?.totalTokens == 10)
 
         let append = try FileHandle(forWritingTo: file)
         try append.seekToEnd()
         let nextEvent = Data(event(20).utf8)
         try append.write(contentsOf: nextEvent.prefix(30))
-        #expect(await source.summaries(for: first, now: now).first?.totalTokens == 10)
+        #expect(await source.report(for: first, now: now).summaries.first?.totalTokens == 10)
         try append.write(contentsOf: nextEvent.dropFirst(30))
         try append.close()
-        #expect(await source.summaries(for: first, now: now).first?.totalTokens == 30)
+        #expect(await source.report(for: first, now: now).summaries.first?.totalTokens == 30)
 
         // Same size and restored mtime must not hide a new account pin.
         var originalStat = stat()
@@ -357,16 +628,16 @@ struct UsageBoundsTests {
         try rewrite.write(contentsOf: Data(replacement.utf8))
         try rewrite.close()
         try #require(utimensat(AT_FDCWD, file.path, &originalTimes, 0) == 0)
-        #expect(await source.summaries(for: first, now: now).isEmpty)
-        #expect(await source.summaries(for: second, now: now).first?.totalTokens == 30)
+        #expect(await source.report(for: first, now: now).summaries.isEmpty)
+        #expect(await source.report(for: second, now: now).summaries.first?.totalTokens == 30)
 
         try Data((header + event(5)).utf8).write(to: file, options: .atomic)
-        #expect(await source.summaries(for: first, now: now).first?.totalTokens == 5)
-        #expect(await source.summaries(for: second, now: now).isEmpty)
+        #expect(await source.report(for: first, now: now).summaries.first?.totalTokens == 5)
+        #expect(await source.report(for: second, now: now).summaries.isEmpty)
         try FileManager.default.removeItem(at: file)
-        #expect(await source.summaries(for: first, now: now).isEmpty)
+        #expect(await source.report(for: first, now: now).summaries.isEmpty)
         try Data((header + event(15)).utf8).write(to: root.appendingPathComponent("new.jsonl"))
-        #expect(await source.summaries(for: first, now: now).first?.totalTokens == 15)
+        #expect(await source.report(for: first, now: now).summaries.first?.totalTokens == 15)
     }
 
     @Test
@@ -384,12 +655,12 @@ struct UsageBoundsTests {
         try Data(data.utf8).write(to: root.appendingPathComponent("session.jsonl"))
         let source = OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 3_600)
         let start = Date(timeIntervalSince1970: 1_800_000_000)
-        #expect(await source.summaries(for: identity, now: start).first?.totalTokens == 10)
-        #expect(await source.summaries(for: identity, now: start.addingTimeInterval(1)).first?.totalTokens == 30)
+        #expect(await source.report(for: identity, now: start).summaries.first?.totalTokens == 10)
+        #expect(await source.report(for: identity, now: start.addingTimeInterval(1)).summaries.first?.totalTokens == 30)
         let cutoff = start.addingTimeInterval(OMPModelUsageSource.lookbackInterval)
-        #expect(await source.summaries(for: identity, now: cutoff).first?.totalTokens == 30)
-        #expect(await source.summaries(for: identity, now: cutoff.addingTimeInterval(0.5)).first?.totalTokens == 20)
-        #expect(await source.summaries(for: identity, now: cutoff.addingTimeInterval(2)).isEmpty)
+        #expect(await source.report(for: identity, now: cutoff).summaries.first?.totalTokens == 30)
+        #expect(await source.report(for: identity, now: cutoff.addingTimeInterval(0.5)).summaries.first?.totalTokens == 20)
+        #expect(await source.report(for: identity, now: cutoff.addingTimeInterval(2)).summaries.isEmpty)
     }
 
     @Test
@@ -459,6 +730,18 @@ struct UsageBoundsTests {
             Issue.record("Expected outputTooLarge, got \(error)")
         }
     }
+}
+
+private func ompMessage(
+    provider: String = "openai-codex",
+    modelID: String,
+    timestamp: Date,
+    usage: String
+) -> String {
+    let timestampMilliseconds = Int(timestamp.timeIntervalSince1970 * 1_000)
+    return """
+    {"type":"message","message":{"role":"assistant","provider":"\(provider)","model":"\(modelID)","timestamp":\(timestampMilliseconds),"usage":\(usage)}}
+    """
 }
 
 private struct FixtureUsageCommandRunner: UsageCommandRunning {

@@ -18,7 +18,7 @@ enum DefaultUsageAdapters {
             }
 
         return codexAdapters + [
-            ClaudeUsageAdapter(http: client, credentials: credentials),
+            ClaudeUsageAdapter(http: client, credentials: credentials, ompUsageSource: ompUsageSource),
             AntigravityUsageAdapter()
         ]
     }

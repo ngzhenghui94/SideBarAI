@@ -47,18 +47,21 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
     private let defaults: UserDefaultsBox
     private let keychainReader: @Sendable (Bool) -> Data?
     private let credentialCache: ClaudeCredentialCache
+    private let ompUsageSource: OMPUsageSource?
 
     init(
         http: UsageHTTPClient = UsageHTTPClient(),
         credentials: LocalCredentialReader = LocalCredentialReader(),
         defaults: UserDefaults = .standard,
-        keychainReader: @escaping @Sendable (Bool) -> Data? = ClaudeUsageAdapter.readKeychainData
+        keychainReader: @escaping @Sendable (Bool) -> Data? = ClaudeUsageAdapter.readKeychainData,
+        ompUsageSource: OMPUsageSource? = nil
     ) {
         self.http = http
         self.credentials = credentials
         self.defaults = UserDefaultsBox(defaults)
         self.keychainReader = keychainReader
         self.credentialCache = ClaudeCredentialCache()
+        self.ompUsageSource = ompUsageSource
     }
 
     var keychainAccessEnabled: Bool {
@@ -154,7 +157,10 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
                 planLabel: nil,
                 sourceLabel: "Claude Code OAuth"
             )
-            return .usage(snapshot)
+            guard let modelUsage = await ompUsageSource?.anthropicModelUsage() else {
+                return .usage(snapshot)
+            }
+            return .usage(snapshot.withModelUsage(modelUsage))
         } catch is CancellationError {
             return .loading
         } catch let error as UsageTransportError {

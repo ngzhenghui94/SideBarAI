@@ -216,7 +216,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         for record in menuRecords {
             let item = NSMenuItem(title: accountMenuTitle(for: record), action: nil, keyEquivalent: "")
             item.isEnabled = false
-            item.toolTip = record.state.errorMessage
+            if case let .usage(snapshot) = record.state, snapshot.hasModelUsage {
+                item.toolTip = snapshot.modelUsageDetail
+            } else {
+                item.toolTip = record.state.errorMessage
+            }
             menu.insertItem(item, at: insertionIndex)
             accountItems.append(item)
             insertionIndex += 1
@@ -288,7 +292,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .unavailable:
             return "Needs setup"
         case let .usage(snapshot):
-            guard let window = snapshot.windows.first else { return "No usage data" }
+            let modelUsageDetail = snapshot.hasModelUsage ? snapshot.modelUsageDetail : nil
+            guard let window = snapshot.windows.first else {
+                return modelUsageDetail ?? "No usage data"
+            }
 
             var detail = "\(window.label): \(usageValue(for: window))"
             if let resetDate = window.resetDate {
@@ -299,19 +306,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             if let label = snapshot.savedResetLabel {
                 detail += " · \(label)"
             }
-            if !snapshot.modelUsage.isEmpty {
-                let modelLabel: String
-                if let tokenCount = snapshot.totalModelTokens,
-                   let formatted = UsageNumberFormatter.compactTokenString(tokenCount) {
-                    modelLabel = "\(snapshot.modelUsage.count) models · \(formatted) tokens"
-                } else {
-                    modelLabel = "\(snapshot.modelUsage.count) models"
-                }
-                detail += " · \(modelLabel)"
-                if let cost = snapshot.estimatedCost,
-                   let formatted = UsageNumberFormatter.currencyString(cost) {
-                    detail += " · est. \(formatted)"
-                }
+            if let label = snapshot.subscriptionRenewalLabel() {
+                detail += " · \(label)"
+            }
+            if let modelUsageDetail {
+                detail += " · \(modelUsageDetail)"
             }
             return detail
         }

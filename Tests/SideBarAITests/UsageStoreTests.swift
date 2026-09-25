@@ -1139,8 +1139,13 @@ struct UsageStoreTests {
     func codexAdapterMapsWhamUsageWindows() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
+        // Real ChatGPT ID tokens use a "+00:00" offset for the paid-through date.
+        let claims = #"{"https://api.openai.com/auth":{"chatgpt_subscription_active_until":"2030-10-17T01:41:06+00:00"}}"#
+        let idToken = "e30." + Data(claims.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "") + ".sig"
         try write(
-            "{\"tokens\":{\"access_token\":\"fixture-token\",\"account_id\":\"account-123\"}}",
+            "{\"tokens\":{\"access_token\":\"fixture-token\",\"account_id\":\"account-123\",\"id_token\":\"\(idToken)\"}}",
             to: home.appendingPathComponent(".codex/auth.json")
         )
 
@@ -1165,6 +1170,11 @@ struct UsageStoreTests {
         #expect(snapshot.windows.first?.label == "5-hour window")
         #expect(snapshot.planLabel == "pro")
         #expect(AccountPlanLabel.displayName(for: snapshot.planLabel) == "Pro")
+        let renewal = try #require(snapshot.subscriptionRenewsAt)
+        #expect(renewal == Date(timeIntervalSince1970: 1_918_431_666))
+        #expect(snapshot.subscriptionRenewalLabel(now: renewal.addingTimeInterval(-1)) != nil)
+        // The claim only refreshes at login, so a passed date is stale and hidden.
+        #expect(snapshot.subscriptionRenewalLabel(now: renewal) == nil)
     }
 
     @Test

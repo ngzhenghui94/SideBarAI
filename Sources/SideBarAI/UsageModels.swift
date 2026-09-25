@@ -237,31 +237,47 @@ struct UsageSnapshot: Equatable, Sendable {
     let updatedAt: Date
     let accountLabel: String?
     let planLabel: String?
+    /// Paid-through date reported by the provider; nil when unknown.
+    let subscriptionRenewsAt: Date?
     let sourceLabel: String
     var savedResetCount: Int? = nil
     let modelUsage: [ModelUsageSummary]
+    let unattributedModelRequestCount: Int
+    let modelPricing: ModelPricingCatalog?
 
     init(
         windows: [UsageWindow],
         updatedAt: Date,
         accountLabel: String?,
         planLabel: String?,
+        subscriptionRenewsAt: Date? = nil,
         sourceLabel: String,
         savedResetCount: Int? = nil,
-        modelUsage: [ModelUsageSummary] = []
+        modelUsage: [ModelUsageSummary] = [],
+        unattributedModelRequestCount: Int = 0,
+        modelPricing: ModelPricingCatalog? = nil
     ) {
         self.windows = Self.normalizedWindows(windows)
         self.updatedAt = updatedAt
         self.accountLabel = accountLabel
         self.planLabel = planLabel
+        self.subscriptionRenewsAt = subscriptionRenewsAt
         self.sourceLabel = sourceLabel
         self.savedResetCount = savedResetCount.flatMap { $0 >= 0 ? $0 : nil }
         self.modelUsage = modelUsage
+        self.unattributedModelRequestCount = max(0, unattributedModelRequestCount)
+        self.modelPricing = modelPricing
     }
 
     var savedResetLabel: String? {
         guard let savedResetCount, savedResetCount >= 0 else { return nil }
         return "\(savedResetCount) saved \(savedResetCount == 1 ? "reset" : "resets")"
+    }
+
+    /// Hidden once passed: the token claim is only refreshed at login, so a past date is stale.
+    func subscriptionRenewalLabel(now: Date = Date()) -> String? {
+        guard let subscriptionRenewsAt, subscriptionRenewsAt > now else { return nil }
+        return "Renews \(subscriptionRenewsAt.formatted(.dateTime.month(.abbreviated).day().year()))"
     }
 
     var estimatedCost: Double? {
@@ -270,8 +286,18 @@ struct UsageSnapshot: Equatable, Sendable {
             return nil
         }
 
-        let total = modelUsage.compactMap(\.estimatedCost).reduce(0, +)
-        return total.isFinite && total >= 0 ? total : nil
+        return pricedModelCost
+    }
+
+    var pricedModelCost: Double? {
+        var total = 0.0
+        var hasPrice = false
+        for usage in modelUsage {
+            guard let cost = usage.estimatedCost else { continue }
+            total += cost
+            hasPrice = true
+        }
+        return hasPrice && total.isFinite && total >= 0 ? total : nil
     }
 
     var totalModelTokens: Double? {
@@ -284,15 +310,46 @@ struct UsageSnapshot: Equatable, Sendable {
         modelUsage.contains { $0.estimatedCost == nil }
     }
 
-    func withModelUsage(_ modelUsage: [ModelUsageSummary]) -> UsageSnapshot {
+    var hasModelUsage: Bool {
+        !modelUsage.isEmpty || unattributedModelRequestCount > 0
+    }
+
+    var modelUsageDetail: String? {
+        guard hasModelUsage else { return nil }
+        var parts = ["Local OMP · \(OMPModelUsageSource.lookbackLabel)"]
+        if let tokens = totalModelTokens,
+           let formatted = UsageNumberFormatter.compactTokenString(tokens) {
+            parts.append("\(formatted) tokens incl. cache · \(modelUsage.count) models")
+        } else {
+            parts.append("No account-linked records")
+        }
+        if let cost = pricedModelCost, let formatted = UsageNumberFormatter.currencyString(cost) {
+            let label = hasUnpricedModelUsage ? "priced subtotal" : (modelPricing?.estimateLabel ?? "estimate")
+            parts.append("\(label) ≈ \(formatted), not billed")
+        } else {
+            parts.append("cost unavailable")
+        }
+        if let modelPricing {
+            parts.append(modelPricing.compactAssumptions)
+        }
+        if unattributedModelRequestCount > 0 {
+            parts.append("\(unattributedModelRequestCount) unassigned provider records excluded")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    func withModelUsage(_ report: OMPModelUsageReport) -> UsageSnapshot {
         UsageSnapshot(
             windows: windows,
             updatedAt: updatedAt,
             accountLabel: accountLabel,
             planLabel: planLabel,
+            subscriptionRenewsAt: subscriptionRenewsAt,
             sourceLabel: sourceLabel,
             savedResetCount: savedResetCount,
-            modelUsage: modelUsage
+            modelUsage: report.summaries,
+            unattributedModelRequestCount: report.unattributedRequestCount,
+            modelPricing: report.pricing
         )
     }
 
@@ -542,7 +599,10 @@ private enum CodexUsageAggregation {
                 planLabel: consolidatedPlanLabel(records: records),
                 sourceLabel: "Codex CLI OAuth · \(records.count) accounts consolidated",
                 savedResetCount: summedResetCount(resetCounts, expectedCount: records.count),
-                modelUsage: aggregateModelUsage(from: entries)
+                modelUsage: aggregateModelUsage(from: entries),
+                // Each account reports the same provider-wide unassigned history.
+                unattributedModelRequestCount: entries.reduce(0) { max($0, $1.snapshot.unattributedModelRequestCount) },
+                modelPricing: entries.lazy.compactMap(\.snapshot.modelPricing).first
             ))
         } else if records.contains(where: { $0.state.isLoading }) {
             state = .loading

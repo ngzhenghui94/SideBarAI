@@ -470,22 +470,10 @@ struct PeekUsageView: View {
         selected.append(contentsOf: snapshot.windows.filter { !selectedIDs.contains($0.id) })
         return Array(selected.prefix(2))
     }
-    private var modelUsageSummary: String? {
+    private var modelUsageDetail: String? {
         guard let snapshot,
-              !snapshot.modelUsage.isEmpty else { return nil }
-
-        var parts = ["\(snapshot.modelUsage.count) models"]
-        if let tokenCount = snapshot.totalModelTokens,
-           let formatted = UsageNumberFormatter.compactTokenString(tokenCount) {
-            parts.append("\(formatted) tokens")
-        }
-        if let cost = snapshot.estimatedCost,
-           let formatted = UsageNumberFormatter.currencyString(cost) {
-            parts.append("est. \(formatted)")
-        } else if snapshot.hasUnpricedModelUsage {
-            parts.append("cost unavailable")
-        }
-        return parts.joined(separator: " · ")
+              snapshot.hasModelUsage else { return nil }
+        return snapshot.modelUsageDetail
     }
 
     var body: some View {
@@ -521,6 +509,11 @@ struct PeekUsageView: View {
                         Text(label)
                             .font(SideBarTheme.caption)
                             .foregroundStyle(record.provider.accentColor)
+                    }
+                    if let label = snapshot?.subscriptionRenewalLabel() {
+                        Text(label)
+                            .font(SideBarTheme.caption)
+                            .foregroundStyle(SideBarTheme.secondaryText)
                     }
                 }
 
@@ -566,12 +559,13 @@ struct PeekUsageView: View {
                             windows: quickPeekWindows,
                             accent: record.provider.accentColor
                         )
-                        if let modelUsageSummary {
-                            Text("Model usage · \(OMPModelUsageSource.lookbackLabel) · \(modelUsageSummary)")
+                        if let modelUsageDetail {
+                            Text(modelUsageDetail)
                                 .font(SideBarTheme.caption)
                                 .foregroundStyle(SideBarTheme.secondaryText)
                                 .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
+                                .help(modelUsageDetail)
+                                .accessibilityLabel(modelUsageDetail)
                         }
                     }
             }

@@ -562,10 +562,14 @@ struct SettingsView: View {
                 Text(updatedLabel(snapshot.updatedAt))
                     .font(.system(size: 11, design: .rounded))
                     .foregroundStyle(.secondary)
-                if let detail = modelUsageDetail(snapshot) {
+                if snapshot.hasModelUsage,
+                   let detail = snapshot.modelUsageDetail {
                     Text(detail)
                         .font(.system(size: 11, design: .rounded))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(detail)
+                        .accessibilityLabel(detail)
                 }
             }
         }
@@ -611,22 +615,5 @@ struct SettingsView: View {
         if seconds < 60 { return "Updated just now" }
         let minutes = Int(seconds / 60)
         return minutes == 1 ? "Updated 1 minute ago" : "Updated \(minutes) minutes ago"
-    }
-    private func modelUsageDetail(_ snapshot: UsageSnapshot) -> String? {
-        guard !snapshot.modelUsage.isEmpty else { return nil }
-
-        var parts = ["\(snapshot.modelUsage.count) models"]
-        if let tokenCount = snapshot.totalModelTokens,
-           let formatted = UsageNumberFormatter.compactTokenString(tokenCount) {
-            parts.append("\(formatted) tokens")
-        }
-        if let cost = snapshot.estimatedCost,
-           let formatted = UsageNumberFormatter.currencyString(cost) {
-            parts.append("est. \(formatted)")
-        } else if snapshot.hasUnpricedModelUsage {
-            parts.append("cost unavailable")
-        }
-        parts.append(OMPModelUsageSource.lookbackLabel)
-        return parts.joined(separator: " · ")
     }
 }
