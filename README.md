@@ -94,9 +94,9 @@ The packaging script accepts `bash scripts/package-app.sh [debug|release] [desti
 Builds are ad-hoc signed unless `CODESIGN_IDENTITY` names a signing identity; a real identity also enables the hardened runtime and a secure timestamp. To produce a notarized release, store notary credentials once, then package with both variables:
 
 ```sh
-xcrun notarytool store-credentials sidebarai-notary --apple-id <apple-id> --team-id F57QJC4XU3
+xcrun notarytool store-credentials notary --apple-id <apple-id> --team-id F57QJC4XU3
 CODESIGN_IDENTITY="Developer ID Application: Zheng Hui Ng (F57QJC4XU3)" \
-NOTARY_PROFILE=sidebarai-notary bash scripts/package-app.sh release
+NOTARY_PROFILE=notary bash scripts/package-app.sh release
 ```
 
 The script submits the app, waits for Apple's verdict (printing the log on rejection), staples the ticket, checks Gatekeeper, and writes `dist/SideBarAI-<version>.zip`.
