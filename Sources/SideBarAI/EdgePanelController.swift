@@ -295,6 +295,7 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
         static let compactProviderSpacing: CGFloat = 8
         static let minimumCompactHeight: CGFloat = 140
         static let peekHeight: CGFloat = 384
+        static let peekMaximumHeight: CGFloat = 520
         static let expandedHeight: CGFloat = 640
     }
 
@@ -309,6 +310,8 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
     private(set) var isDetached = false
     private(set) var attachment: SidebarEdge
     private var peekedRecordID: String?
+    /// Height that fits the current peek content; falls back to the design maximum.
+    private var peekHeight: CGFloat = Metrics.peekHeight
     private var isPositioningPanel = false
     private var hasPositionedPanel = false
 
@@ -636,22 +639,24 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
         let contentView = NSView(frame: peekPanel.contentView?.bounds ?? contentFrame)
         contentView.autoresizingMask = [.width, .height]
 
-        let hostingView = NSHostingView(
-            rootView: PeekUsageView(
-                record: record,
-                onExpand: { [weak self] in
-                    Task { @MainActor [weak self] in
-                        self?.setExpanded(true)
-                    }
-                },
-                onHoverChange: { [weak self] hovering in
-                    Task { @MainActor [weak self] in
-                        self?.handlePeekHover(hovering)
-                    }
+        let rootView = PeekUsageView(
+            record: record,
+            onExpand: { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.setExpanded(true)
                 }
-            )
-                .environment(\.sideBarLiquidGlassEnabled, store.liquidGlassEnabled)
+            },
+            onHoverChange: { [weak self] hovering in
+                Task { @MainActor [weak self] in
+                    self?.handlePeekHover(hovering)
+                }
+            }
         )
+        .environment(\.sideBarLiquidGlassEnabled, store.liquidGlassEnabled)
+        peekHeight = ceil(NSHostingController(rootView: rootView).sizeThatFits(
+            in: CGSize(width: Metrics.peekWidth, height: Metrics.peekMaximumHeight)
+        ).height)
+        let hostingView = NSHostingView(rootView: rootView)
         hostingView.frame = contentView.bounds
         hostingView.autoresizingMask = [.width, .height]
         contentView.addSubview(hostingView)
@@ -823,7 +828,7 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
 
         let peekSize = CGSize(
             width: min(Metrics.peekWidth, visibleFrame.width),
-            height: min(Metrics.peekHeight, visibleFrame.height)
+            height: min(peekHeight, Metrics.peekMaximumHeight, visibleFrame.height)
         )
         let peekFrame = SidebarFramePlacement.peekFrame(
             for: frame,

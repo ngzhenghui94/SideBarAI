@@ -89,11 +89,13 @@ To create an app bundle without installing it:
 bash scripts/package-app.sh release
 ```
 
-The packaging script accepts `bash scripts/package-app.sh [debug|release] [destination]`.
+The packaging script accepts `bash scripts/package-app.sh [debug|release] [destination]`. It places the SwiftPM asset bundle under `Contents/Resources`, signs the complete app, and verifies its signature with `codesign --verify --strict`. Installation verifies the copied app as well. Signing only the executable before embedding it in an app can leave an invalid bundle signature and interfere with Keychain authorization.
 
 ## Privacy and credentials
 
-SideBarAI is a local usage monitor. Credentials remain managed by each provider CLI. Claude may optionally use macOS Keychain access after you authorize it in Settings.
+SideBarAI is a local usage monitor. Credentials remain managed by each provider CLI. Claude may optionally use macOS Keychain access after you authorize it in Settings. Background reads disable both LocalAuthentication interaction and legacy login-Keychain dialogs. If access needs approval, usage remains unavailable until you choose **Use Keychain**; refreshes do not request your password. Already-authorized credentials can still be picked up silently after Claude Code rotates them. The legacy interaction guard uses deprecated Security APIs because Claude Code stores its item in the login Keychain, not the Data Protection keychain.
+
+If **Use Keychain** fails, Settings distinguishes a macOS Security error (with its numeric code) from a successful Keychain read containing an expired or invalid Claude login. For the latter, sign in again using `claude`, then retry **Use Keychain**. No credential contents are shown.
 
 SideBarAI does not create, refresh, or display fake usage values. Provider and network availability can affect the usage shown in the sidebar.
 

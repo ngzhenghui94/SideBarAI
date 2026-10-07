@@ -19,9 +19,28 @@ private final class ClaudeCredentialCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state: State = .notRead
+    private var authorizationFailure: String?
+
+    func failureMessage() -> String? { lock.withLock { authorizationFailure } }
+
+    func setFailureMessage(_ message: String?) {
+        lock.withLock { authorizationFailure = message }
+    }
+    private var rejectedAccessToken: String?
 
     func value() -> State {
         lock.withLock { state }
+    }
+
+    func reject(_ accessToken: String) {
+        lock.withLock {
+            rejectedAccessToken = accessToken
+            state = .notRead
+        }
+    }
+
+    func isRejected(_ accessToken: String) -> Bool {
+        lock.withLock { rejectedAccessToken == accessToken }
     }
 
     func store(_ data: Data) {
@@ -45,7 +64,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
     private let http: UsageHTTPClient
     private let credentials: LocalCredentialReader
     private let defaults: UserDefaultsBox
-    private let keychainReader: @Sendable (Bool) -> Data?
+    private let keychainReader: @Sendable (Bool) throws -> Data?
     private let credentialCache: ClaudeCredentialCache
     private let ompUsageSource: OMPUsageSource?
 
@@ -53,7 +72,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         http: UsageHTTPClient = UsageHTTPClient(),
         credentials: LocalCredentialReader = LocalCredentialReader(),
         defaults: UserDefaults = .standard,
-        keychainReader: @escaping @Sendable (Bool) -> Data? = ClaudeUsageAdapter.readKeychainData,
+        keychainReader: @escaping @Sendable (Bool) throws -> Data? = ClaudeUsageAdapter.readKeychainData,
         ompUsageSource: OMPUsageSource? = nil
     ) {
         self.http = http
@@ -124,6 +143,15 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
             }
         }
 
+        // Keychain keeps serving a revoked token until Claude Code rotates it; don't resend it.
+        if credentialCache.isRejected(accessToken) {
+            return .unavailable(message: ProviderFailureMessage.transport(
+                .unauthorized,
+                provider: "Claude",
+                command: "claude"
+            ))
+        }
+
         guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
             return .unavailable(message: "Claude usage endpoint is unavailable.")
         }
@@ -165,7 +193,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
             return .loading
         } catch let error as UsageTransportError {
             if error == .unauthorized {
-                credentialCache.clear()
+                credentialCache.reject(accessToken)
             }
             return .unavailable(message: ProviderFailureMessage.transport(
                 error,
@@ -201,7 +229,22 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
                 : .keychainAuthorizationRequired)
         }
 
-        switch credentialCache.value() {
+        let cached = credentialCache.value()
+        if case let .data(data) = cached,
+           case let .success(oauth) = decodeKeychainCredentials(data),
+           isUsableForAuthorization(oauth) {
+            return .success(oauth)
+        }
+
+        // Claude Code rotates the token in Keychain; pick it up silently (never prompts).
+        if let data = keychainData(allowInteraction: false),
+           case let .success(oauth) = decodeKeychainCredentials(data),
+           isUsableForAuthorization(oauth) {
+            credentialCache.store(data)
+            return .success(oauth)
+        }
+
+        switch cached {
         case let .data(data):
             return decodeKeychainCredentials(data)
         case .unavailable:
@@ -224,11 +267,40 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         return .success(oauth)
     }
 
+    var keychainAuthorizationFailure: String? { credentialCache.failureMessage() }
+
     private func keychainData(allowInteraction: Bool) -> Data? {
-        keychainReader(allowInteraction)
+        do {
+            return try keychainReader(allowInteraction)
+        } catch {
+            if allowInteraction {
+                let code = (error as NSError).code
+                let detail = SecCopyErrorMessageString(OSStatus(clamping: code), nil) as String? ?? "Unknown Security error"
+                credentialCache.setFailureMessage("macOS Keychain error \(code): \(detail)")
+            }
+            return nil
+        }
     }
 
-    private static func readKeychainData(allowInteraction: Bool) -> Data? {
+    private static let keychainInteractionLock = NSLock()
+
+    private static func readKeychainData(allowInteraction: Bool) throws -> Data? {
+        // Login-Keychain ACL prompts are not controlled by LAContext. Serialize
+        // all reads while temporarily changing its process-wide interaction flag.
+        keychainInteractionLock.lock()
+        defer { keychainInteractionLock.unlock() }
+        var previousInteraction: DarwinBoolean = false
+        if !allowInteraction {
+            guard SecKeychainGetUserInteractionAllowed(&previousInteraction) == errSecSuccess,
+                  SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else {
+                return nil
+            }
+        }
+        defer {
+            if !allowInteraction {
+                _ = SecKeychainSetUserInteractionAllowed(previousInteraction.boolValue)
+            }
+        }
         let context = LAContext()
         context.interactionNotAllowed = !allowInteraction
         let query: [CFString: Any] = [
@@ -240,20 +312,51 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return nil }
+        guard status == errSecSuccess else {
+            // Claude Code rewrites the item via /usr/bin/security on every token refresh,
+            // which drops our "Always Allow" ACL entry. `security` created the item, so it
+            // stays trusted and can read it without prompting.
+            if !allowInteraction, let data = readKeychainDataViaSecurityCLI() {
+                return data
+            }
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
         return result as? Data
+    }
+
+    private static func readKeychainDataViaSecurityCLI() -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 && !data.isEmpty ? data : nil
     }
 
     @MainActor
     internal func authorizeKeychainAccess() -> Bool {
         credentialCache.clear()
+        credentialCache.setFailureMessage(nil)
         guard let data = keychainData(allowInteraction: true) else {
             credentialCache.storeUnavailable()
             return false
         }
 
-        guard case let .success(oauth) = decodeKeychainCredentials(data),
-              isUsableForAuthorization(oauth) else {
+        let oauth: ClaudeOAuthCredentials
+        switch decodeKeychainCredentials(data) {
+        case let .success(value):
+            oauth = value
+        case let .failure(issue):
+            credentialCache.setFailureMessage(ProviderFailureMessage.credential(issue, command: "claude"))
+            credentialCache.storeUnavailable()
+            return false
+        }
+        guard isUsableForAuthorization(oauth) else {
+            credentialCache.setFailureMessage("Keychain access succeeded, but the Claude login has expired or is invalid. Run claude and sign in again, then choose Use Keychain.")
             credentialCache.storeUnavailable()
             return false
         }

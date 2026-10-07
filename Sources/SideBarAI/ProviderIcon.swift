@@ -14,7 +14,7 @@ struct ProviderIcon: View {
     }
 
     var body: some View {
-        if let image = loadImage() {
+        if let image = Self.templateImage(for: provider) {
             Image(nsImage: image)
                 .resizable()
                 .renderingMode(.template)
@@ -30,9 +30,18 @@ struct ProviderIcon: View {
         }
     }
 
-    private func loadImage() -> NSImage? {
-        guard let assetName,
-              let url = Bundle.module.url(forResource: assetName, withExtension: "svg"),
+    private static let resourceBundle: Bundle = {
+        if let resourceURL = Bundle.main.resourceURL?.appendingPathComponent("SideBarAI_SideBarAI.bundle"),
+           let bundle = Bundle(url: resourceURL) {
+            return bundle
+        }
+        return .module
+    }()
+
+    /// Template brand mark for the provider, or nil when only an SF Symbol exists.
+    static func templateImage(for provider: Provider) -> NSImage? {
+        guard let assetName = assetName(for: provider),
+              let url = Self.resourceBundle.url(forResource: assetName, withExtension: "svg"),
               let image = NSImage(contentsOf: url) else {
             return nil
         }
@@ -40,7 +49,7 @@ struct ProviderIcon: View {
         return image
     }
 
-    private var assetName: String? {
+    private static func assetName(for provider: Provider) -> String? {
         switch provider {
         case .claude:
             "claude"

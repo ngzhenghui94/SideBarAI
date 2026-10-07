@@ -312,7 +312,8 @@ final class UsageStore {
             refresh()
         } else {
             claudeKeychainAuthorizedForRun = false
-            keychainAuthorizationMessage = "Claude Keychain access was not authorized. Allow access and try again."
+            keychainAuthorizationMessage = adapter.keychainAuthorizationFailure
+                ?? "Claude Keychain access was not authorized. Allow access and try again."
         }
     }
 
@@ -456,7 +457,9 @@ final class UsageStore {
         guard authorizedForRun != claudeKeychainAuthorizedForRun else { return }
 
         claudeKeychainAuthorizedForRun = authorizedForRun
-        if !authorizedForRun, claudeKeychainAccessEnabled {
+        if authorizedForRun {
+            keychainAuthorizationMessage = nil
+        } else if claudeKeychainAccessEnabled {
             keychainAuthorizationMessage = "Claude Keychain authorization is no longer valid. Choose Use Keychain to authorize this run again."
         }
     }

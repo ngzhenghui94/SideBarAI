@@ -123,21 +123,8 @@ private struct CompactRailView: View {
         }
     }
 
-    private var expandButtonRadii: RectangleCornerRadii {
-        switch attachment {
-        case .left:
-            .init(topLeading: 0, bottomLeading: 0, bottomTrailing: 11, topTrailing: 11)
-        case .right:
-            .init(topLeading: 11, bottomLeading: 11, bottomTrailing: 0, topTrailing: 0)
-        case .top:
-            .init(topLeading: 0, bottomLeading: 11, bottomTrailing: 11, topTrailing: 0)
-        case .bottom:
-            .init(topLeading: 11, bottomLeading: 0, bottomTrailing: 0, topTrailing: 11)
-        }
-    }
-
-    private var expandButtonShape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(cornerRadii: expandButtonRadii, style: .continuous)
+    private var expandButtonShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
     }
 
     var body: some View {
@@ -183,9 +170,15 @@ private struct CompactRailView: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
-            CompactRailShape(isDetached: isDetached, attachment: attachment)
-                .fill(usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.canvas)
-                .allowsHitTesting(false)
+            ZStack {
+                CompactRailShape(isDetached: isDetached, attachment: attachment)
+                    .fill(usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.canvas)
+                if !usesLiquidGlass {
+                    CompactRailShape(isDetached: isDetached, attachment: attachment)
+                        .fill(SideBarTheme.panelTint)
+                }
+            }
+            .allowsHitTesting(false)
         }
         .sideBarGlassEffect(in: CompactRailShape(isDetached: isDetached, attachment: attachment))
         .clipShape(CompactRailShape(isDetached: isDetached, attachment: attachment))
@@ -331,76 +324,97 @@ private struct CompactProviderIndicator: View {
             return "\(Int(percentage.rounded()))%"
         }
         if record.state.isLoading {
-            return "..."
+            return "…"
         }
         return "—"
     }
 
+    private var levelColor: Color {
+        SideBarTheme.usageColor(
+            percentUsed: primaryWindow?.percentUsed,
+            normal: record.provider.accentColor
+        )
+    }
+
+    private var tileShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+    }
+
+    /// A provider tile that fills from the bottom with the primary window's usage,
+    /// with a thin 7-day meter along its base.
     var body: some View {
         VStack(spacing: 4) {
-            ZStack {
-                Circle()
-                    .stroke(SideBarTheme.usageTrack, lineWidth: 3)
+            ZStack(alignment: .bottom) {
+                tileShape.fill(SideBarTheme.usageTrackSubtle)
 
                 if let progress {
-                    Circle()
-                        .trim(from: 0, to: progress)
-                        .stroke(
-                            fiveHourWindow == nil ? record.provider.accentColor : SideBarTheme.success,
-                            style: StrokeStyle(lineWidth: 3, lineCap: .round)
-                        )
-                        .rotationEffect(.degrees(-90))
-                        .animation(.easeOut(duration: 0.22), value: progress)
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [levelColor.opacity(0.55), levelColor.opacity(0.2)],
+                                    startPoint: .bottom,
+                                    endPoint: .top
+                                )
+                            )
+                            .frame(height: geometry.size.height * min(max(progress, 0), 1))
+                            .frame(maxHeight: .infinity, alignment: .bottom)
+                    }
+                    .animation(.easeOut(duration: 0.25), value: progress)
                 }
 
-                if sevenDayWindow != nil {
-                    Circle()
-                        .stroke(SideBarTheme.usageTrackSubtle, lineWidth: 2)
-                        .frame(width: 29, height: 29)
-
-                    if let secondaryProgress {
-                        Circle()
-                            .trim(from: 0, to: secondaryProgress)
-                            .stroke(
-                                SideBarTheme.usageSevenDay,
-                                style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                            )
-                            .frame(width: 29, height: 29)
-                            .rotationEffect(.degrees(-90))
-                            .animation(.easeOut(duration: 0.22), value: secondaryProgress)
+                Group {
+                    if record.state.isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(SideBarTheme.secondaryText)
+                    } else {
+                        ProviderIcon(
+                            provider: record.provider,
+                            size: 17,
+                            tint: progress == nil ? record.provider.accentColor : SideBarTheme.primaryText
+                        )
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if record.state.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(SideBarTheme.secondaryText)
-                } else {
-                    ProviderIcon(
-                        provider: record.provider,
-                        size: 16,
-                        tint: SideBarTheme.primaryText
+                if let secondaryProgress {
+                    UsageMeterBar(
+                        progress: secondaryProgress,
+                        color: SideBarTheme.usageColor(
+                            percentUsed: sevenDayWindow?.percentUsed,
+                            normal: SideBarTheme.usageSevenDay
+                        ),
+                        height: 3
                     )
+                    .padding(.horizontal, 7)
+                    .padding(.bottom, 5)
                 }
             }
-            .frame(width: 42, height: 42)
+            .frame(width: 40, height: 40)
+            .clipShape(tileShape)
+            .overlay {
+                tileShape.stroke(
+                    (progress == nil ? record.provider.accentColor : levelColor).opacity(0.35),
+                    lineWidth: 0.8
+                )
+            }
             .overlay(alignment: .topTrailing) {
                 if record.isActive {
                     Circle()
                         .fill(SideBarTheme.success)
-                        .frame(width: 6, height: 6)
+                        .frame(width: 7, height: 7)
                         .overlay {
-                            Circle().stroke(SideBarTheme.canvas, lineWidth: 1.25)
+                            Circle().stroke(SideBarTheme.canvas, lineWidth: 1.5)
                         }
+                        .offset(x: 2, y: -2)
                 }
             }
 
             Text(valueLabel)
-                .font(SideBarTheme.caption)
+                .font(SideBarTheme.caption.weight(.semibold))
                 .foregroundStyle(SideBarTheme.primaryText)
                 .monospacedDigit()
-
-
         }
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
@@ -470,27 +484,115 @@ struct PeekUsageView: View {
         selected.append(contentsOf: snapshot.windows.filter { !selectedIDs.contains($0.id) })
         return Array(selected.prefix(2))
     }
-    private var modelUsageDetail: String? {
-        guard let snapshot,
-              snapshot.hasModelUsage else { return nil }
-        return snapshot.modelUsageDetail
+
+    private var peakPercent: Double? {
+        QuotaSummary.highestPercentage(in: [record]).map(Double.init)
     }
 
+    private var planDateLabels: [String] {
+        [snapshot?.savedResetLabel, snapshot?.subscriptionRenewalLabel()].compactMap { $0 }
+    }
+
+    private var panelShape: some Shape { ChatBubbleShape() }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(record.provider.accentColor.opacity(0.18))
-                    ProviderIcon(
-                        provider: record.provider,
-                        size: 19,
-                        tint: record.provider.accentColor
+        VStack(alignment: .leading, spacing: 12) {
+            header
+
+            switch record.state {
+            case .loading:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking usage…")
+                }
+                .font(SideBarTheme.body)
+                .foregroundStyle(SideBarTheme.secondaryText)
+
+            case let .authenticated(accountLabel):
+                PeekStateMessage(
+                    title: "Connected",
+                    detail: accountLabel ?? "Waiting for usage data."
+                )
+
+            case let .unavailable(message):
+                PeekStateMessage(title: "Unavailable", detail: message)
+
+            case .usage:
+                if !quickPeekWindows.isEmpty {
+                    PeekCombinedUsageView(
+                        windows: quickPeekWindows,
+                        accent: record.provider.accentColor
                     )
                 }
-                .frame(width: 34, height: 34)
+            }
 
-                VStack(alignment: .leading, spacing: 3) {
+            if !planDateLabels.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(planDateLabels, id: \.self) { label in
+                        Label(label, systemImage: "calendar")
+                    }
+                }
+                .font(SideBarTheme.caption)
+                .foregroundStyle(SideBarTheme.secondaryText)
+            }
+
+            if let snapshot, snapshot.hasModelUsage {
+                PeekModelCostRow(snapshot: snapshot, accent: record.provider.accentColor)
+            }
+
+            Button {
+                onExpand()
+            } label: {
+                HStack(spacing: 7) {
+                    Text("Open dashboard")
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .font(SideBarTheme.caption.weight(.semibold))
+                .foregroundStyle(SideBarTheme.primaryText)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.brand.opacity(0.18),
+                    in: Capsule()
+                )
+                .sideBarGlassEffect(in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+            .accessibilityLabel("Open full usage dashboard")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 16 + ChatBubbleShape.tailWidth)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background {
+            if usesLiquidGlass {
+                panelShape.fill(SideBarTheme.glassSurface)
+            } else {
+                ZStack {
+                    panelShape.fill(SideBarTheme.canvas)
+                    panelShape.fill(SideBarTheme.panelTint)
+                }
+            }
+        }
+        .sideBarGlassEffect(in: panelShape)
+        .clipShape(panelShape)
+        .overlay {
+            if !usesLiquidGlass {
+                panelShape.stroke(SideBarTheme.border, lineWidth: 0.8)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover(perform: onHoverChange)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                ProviderTile(provider: record.provider, size: 36)
+
+                VStack(alignment: .leading, spacing: 2) {
                     Text(record.provider.displayName)
                         .font(SideBarTheme.headline)
                         .foregroundStyle(SideBarTheme.primaryText)
@@ -500,129 +602,88 @@ struct PeekUsageView: View {
                         .foregroundStyle(SideBarTheme.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if let planLabel = record.planStatusLabel {
-                        Text("Plan: \(planLabel)")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                            .foregroundStyle(record.provider.accentColor)
-                    }
-                    if let label = snapshot?.savedResetLabel {
-                        Text(label)
-                            .font(SideBarTheme.caption)
-                            .foregroundStyle(record.provider.accentColor)
-                    }
-                    if let label = snapshot?.subscriptionRenewalLabel() {
-                        Text(label)
-                            .font(SideBarTheme.caption)
-                            .foregroundStyle(SideBarTheme.secondaryText)
-                    }
                 }
 
                 Spacer(minLength: 6)
 
-                if record.isActive {
-                    Text("ACTIVE")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .tracking(0.5)
-                        .foregroundStyle(SideBarTheme.success)
-                }
-            }
-
-            Text("Usage overview")
-                .font(SideBarTheme.body.weight(.semibold))
-                .foregroundStyle(SideBarTheme.primaryText)
-                .padding(.top, 18)
-                .padding(.bottom, 10)
-
-            Group {
-                switch record.state {
-                case .loading:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Checking usage…")
+                if let peak = SideBarTheme.percentLabel(peakPercent) {
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(peak)
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            .foregroundStyle(SideBarTheme.usageColor(percentUsed: peakPercent, normal: SideBarTheme.primaryText))
+                            .monospacedDigit()
+                        Text("PEAK")
+                            .font(.system(size: 7, weight: .bold, design: .rounded))
+                            .tracking(0.6)
+                            .foregroundStyle(SideBarTheme.mutedText)
                     }
-                    .font(SideBarTheme.body)
-                    .foregroundStyle(SideBarTheme.secondaryText)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Peak quota usage \(peak)")
+                }
+            }
 
-                case let .authenticated(accountLabel):
-                    PeekStateMessage(
-                        title: "Connected",
-                        detail: accountLabel ?? "Waiting for usage data."
-                    )
-
-                case let .unavailable(message):
-                    PeekStateMessage(title: "Unavailable", detail: message)
-
-                case .usage:
-                    VStack(alignment: .leading, spacing: 8) {
-                        PeekCombinedUsageView(
-                            windows: quickPeekWindows,
-                            accent: record.provider.accentColor
-                        )
-                        if let modelUsageDetail {
-                            Text(modelUsageDetail)
-                                .font(SideBarTheme.caption)
-                                .foregroundStyle(SideBarTheme.secondaryText)
-                                .lineLimit(2)
-                                .help(modelUsageDetail)
-                                .accessibilityLabel(modelUsageDetail)
-                        }
+            if record.isActive || record.planStatusLabel != nil {
+                HStack(spacing: 5) {
+                    if record.isActive {
+                        Chip(text: "ACTIVE", color: SideBarTheme.success, showsDot: true)
                     }
-            }
-            }
-
-            Spacer(minLength: 14)
-
-            Button {
-                onExpand()
-            } label: {
-                HStack(spacing: 7) {
-                    Text("Open dashboard")
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                }
-                .font(SideBarTheme.caption)
-                .foregroundStyle(SideBarTheme.primaryText)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(
-                    usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.elevated,
-                    in: Capsule()
-                )
-                .sideBarGlassEffect(in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Open full usage dashboard")
-        }
-        .padding(.leading, 18)
-        .padding(.trailing, 18 + ChatBubbleShape.tailWidth)
-        .padding(.vertical, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background {
-            if usesLiquidGlass {
-                ChatBubbleShape()
-                    .fill(SideBarTheme.glassSurface)
-            } else {
-                ZStack {
-                    ChatBubbleShape()
-                        .fill(SideBarTheme.canvas)
-                    ChatBubbleShape()
-                        .fill(.ultraThinMaterial)
-                        .opacity(0.15)
+                    if let planLabel = record.planStatusLabel {
+                        Chip(text: planLabel.uppercased(), color: record.provider.accentColor)
+                    }
                 }
             }
         }
-        .sideBarGlassEffect(in: ChatBubbleShape())
-        .clipShape(ChatBubbleShape())
-        .overlay {
-            if !usesLiquidGlass {
-                ChatBubbleShape()
-                    .stroke(SideBarTheme.border, lineWidth: 0.8)
-            }
-        }
-        .contentShape(Rectangle())
-        .onHover(perform: onHoverChange)
     }
 }
+
+/// One-line local model usage summary: estimated cost, token volume and lookback.
+@MainActor
+private struct PeekModelCostRow: View {
+    let snapshot: UsageSnapshot
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "cpu")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(accent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(tokenLine)
+                    .foregroundStyle(SideBarTheme.secondaryText)
+                Text("Local OMP · \(OMPModelUsageSource.lookbackLabel)")
+                    .foregroundStyle(SideBarTheme.mutedText)
+            }
+            .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(costLabel)
+                .font(SideBarTheme.body.weight(.semibold))
+                .foregroundStyle(snapshot.pricedModelCost == nil ? SideBarTheme.mutedText : accent)
+                .monospacedDigit()
+        }
+        .font(SideBarTheme.caption)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(SideBarTheme.elevated, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .help(snapshot.modelUsageDetail ?? "")
+        .accessibilityElement(children: .combine)
+    }
+
+    private var tokenLine: String {
+        guard let tokens = snapshot.totalModelTokens,
+              let formatted = UsageNumberFormatter.compactTokenString(tokens) else {
+            return "No account-linked records"
+        }
+        let count = snapshot.modelUsage.count
+        return "\(formatted) tokens · \(count) \(count == 1 ? "model" : "models")"
+    }
+
+    private var costLabel: String {
+        guard let cost = snapshot.pricedModelCost,
+              let formatted = UsageNumberFormatter.currencyString(cost) else { return "—" }
+        return "≈ \(formatted)"
+    }
+}
+
 
 private struct ChatBubbleShape: Shape {
     static let tailWidth: CGFloat = 10
@@ -688,16 +749,29 @@ private struct PeekCombinedUsageView: View {
     let accent: Color
     @Environment(\.sideBarLiquidGlassEnabled) private var usesLiquidGlass
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
-                PeekUsageGauge(window: window, accent: accent)
-                    .frame(maxWidth: .infinity)
-
-                if index < windows.count - 1 {
-                    Rectangle()
-                        .fill(SideBarTheme.border)
-                        .frame(width: 1, height: 122)
+        Group {
+            if windows.count == 1, let window = windows.first {
+                HStack(spacing: 16) {
+                    PeekUsageGauge(window: window, accent: accent, showsDetails: false)
+                    PeekUsageDetails(window: window, accent: accent, alignment: .leading)
+                        .fixedSize()
+                    Spacer(minLength: 0)
                 }
+            } else {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
+                        PeekUsageGauge(window: window, accent: accent, showsDetails: true)
+                            .frame(maxWidth: .infinity)
+
+                        if index < windows.count - 1 {
+                            Rectangle()
+                                .fill(SideBarTheme.border)
+                                .frame(width: 1)
+                                .padding(.vertical, 6)
+                        }
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 12)
@@ -722,26 +796,32 @@ private struct PeekCombinedUsageView: View {
 private struct PeekUsageGauge: View {
     let window: UsageWindow
     let accent: Color
+    let showsDetails: Bool
 
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 8) {
             ZStack {
                 Circle()
-                    .stroke(SideBarTheme.usageTrack, lineWidth: 6)
+                    .stroke(SideBarTheme.usageTrack, lineWidth: 7)
 
-                if let percentage {
+                if let percentage, percentage > 0 {
                     Circle()
                         .trim(from: 0, to: percentage / 100)
                         .stroke(
-                            accent,
-                            style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                            AngularGradient(
+                                colors: [levelColor.opacity(0.55), levelColor],
+                                center: .center,
+                                startAngle: .degrees(0),
+                                endAngle: .degrees(360 * percentage / 100)
+                            ),
+                            style: StrokeStyle(lineWidth: 7, lineCap: .round)
                         )
                         .rotationEffect(.degrees(-90))
                 }
 
                 VStack(spacing: 0) {
                     Text(valueLabel)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundStyle(SideBarTheme.primaryText)
                         .monospacedDigit()
                     Text("USED")
@@ -750,31 +830,10 @@ private struct PeekUsageGauge: View {
                         .foregroundStyle(SideBarTheme.mutedText)
                 }
             }
-            .frame(width: 68, height: 68)
+            .frame(width: 72, height: 72)
 
-            VStack(spacing: 2) {
-                Text(shortLabel)
-                    .font(SideBarTheme.caption.weight(.semibold))
-                    .foregroundStyle(SideBarTheme.primaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-
-                Text(remainingLabel)
-                    .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .foregroundStyle(accent)
-                    .monospacedDigit()
-            }
-
-            if let resetDate = window.resetDate {
-                HStack(spacing: 3) {
-                    Image(systemName: "clock")
-                    Text(resetDate, style: .relative)
-                        .monospacedDigit()
-                }
-                .font(.system(size: 9, weight: .medium, design: .rounded))
-                .foregroundStyle(SideBarTheme.mutedText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            if showsDetails {
+                PeekUsageDetails(window: window, accent: accent, alignment: .center)
             }
         }
         .accessibilityElement(children: .combine)
@@ -784,18 +843,56 @@ private struct PeekUsageGauge: View {
         window.percentUsed.map { min(max($0, 0), 100) }
     }
 
+    private var levelColor: Color {
+        SideBarTheme.usageColor(percentUsed: percentage, normal: accent)
+    }
+
     private var valueLabel: String {
-        guard let percentage else { return window.unit.displayName.capitalized }
-        return "\(Int(percentage.rounded()))%"
+        SideBarTheme.percentLabel(percentage) ?? window.unit.displayName.capitalized
+    }
+}
+
+/// Window name, remaining share and reset timing shown beside or under a gauge.
+@MainActor
+private struct PeekUsageDetails: View {
+    let window: UsageWindow
+    let accent: Color
+    let alignment: HorizontalAlignment
+
+    var body: some View {
+        VStack(alignment: alignment, spacing: 3) {
+            Text(window.label.replacingOccurrences(of: " window", with: ""))
+                .font(SideBarTheme.caption.weight(.semibold))
+                .foregroundStyle(SideBarTheme.primaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+
+            Text(remainingLabel)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(SideBarTheme.usageColor(percentUsed: window.percentUsed, normal: accent))
+                .monospacedDigit()
+
+            if window.resetDate != nil {
+                Text(window.resetCountdownLabel)
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .foregroundStyle(SideBarTheme.secondaryText)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                if let clock = window.resetClockLabel {
+                    Text(clock)
+                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .foregroundStyle(SideBarTheme.mutedText)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .multilineTextAlignment(alignment == .center ? .center : .leading)
     }
 
     private var remainingLabel: String {
-        guard let percentage else { return "Usage reported" }
-        return "\(Int((100 - percentage).rounded()))% left"
-    }
-
-    private var shortLabel: String {
-        window.label.replacingOccurrences(of: " window", with: "")
+        guard let percentage = window.percentUsed else { return "Usage reported" }
+        return "\(Int((100 - min(max(percentage, 0), 100)).rounded()))% left"
     }
 }
 
@@ -887,13 +984,11 @@ private struct ExpandedDashboardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
                 SidebarDragHandle(attachment: attachment)
-                BrandMark(compact: false)
+                BrandMark()
 
                 Spacer(minLength: 6)
-
-                StatusPill(records: store.presentationRecords, isRefreshing: store.isRefreshing)
 
                 Button(action: onOpenSettings) {
                     Image(systemName: "gearshape")
@@ -928,11 +1023,40 @@ private struct ExpandedDashboardView: View {
                 .accessibilityHint("Returns to the compact edge rail")
             }
 
-            Text("Usage read from your installed AI CLI sessions.")
-                .font(SideBarTheme.body)
-                .foregroundStyle(SideBarTheme.secondaryText)
-                .padding(.top, 16)
-                .padding(.bottom, 18)
+            HStack(spacing: 8) {
+                StatusPill(records: store.presentationRecords, isRefreshing: store.isRefreshing)
+                Spacer(minLength: 6)
+                refreshStatus
+                    .font(SideBarTheme.caption)
+                    .foregroundStyle(SideBarTheme.mutedText)
+                    .lineLimit(1)
+                Button {
+                    store.refresh()
+                } label: {
+                    Group {
+                        if store.isRefreshing {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(SideBarTheme.secondaryText)
+                        }
+                    }
+                        .frame(width: 26, height: 26)
+                        .background(
+                            usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.elevated,
+                            in: Circle()
+                        )
+                        .sideBarGlassEffect(in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isRefreshing)
+                .help("Refresh usage")
+                .accessibilityLabel("Refresh provider usage")
+                .accessibilityHint("Reads the latest usage from configured provider sessions")
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 14)
 
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 10) {
@@ -943,35 +1067,18 @@ private struct ExpandedDashboardView: View {
                 .padding(.bottom, 14)
             }
 
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(SideBarTheme.secondaryText)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Provider credentials stay on this Mac")
-                        .font(SideBarTheme.caption)
-                        .foregroundStyle(SideBarTheme.mutedText)
-                    refreshStatus
-                }
-
-                Spacer(minLength: 8)
-
-                Button("Refresh") {
-                    store.refresh()
-                }
+            Label("Read from your local CLI sessions · credentials stay on this Mac", systemImage: "lock.fill")
                 .font(SideBarTheme.caption)
-                .buttonStyle(.borderless)
-                .foregroundStyle(SideBarTheme.secondaryText)
-                .disabled(store.isRefreshing)
-                .accessibilityLabel("Refresh provider usage")
-                .accessibilityHint("Reads the latest usage from configured provider sessions")
-            }
-            .padding(.top, 10)
-            .overlay(alignment: .top) {
-                Rectangle()
-                    .fill(SideBarTheme.border)
-                    .frame(height: 1)
-            }
+                .foregroundStyle(SideBarTheme.mutedText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 10)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(SideBarTheme.border)
+                        .frame(height: 1)
+                }
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -981,7 +1088,7 @@ private struct ExpandedDashboardView: View {
             } else {
                 ZStack {
                     panelShape.fill(SideBarTheme.canvas)
-                    Rectangle().fill(.ultraThinMaterial).opacity(0.15)
+                    panelShape.fill(SideBarTheme.panelTint)
                 }
             }
         }
@@ -998,11 +1105,7 @@ private struct ExpandedDashboardView: View {
     @ViewBuilder
     private var refreshStatus: some View {
         if store.isRefreshing {
-            HStack(spacing: 5) {
-                ProgressView()
-                    .controlSize(.mini)
-                Text("Checking providers…")
-            }
+            Text("Checking providers…")
         } else if let date = store.lastRefreshCompleted ?? store.lastRefreshAttempt {
             Text("Last checked \(date, style: .relative)")
         } else {
@@ -1013,32 +1116,19 @@ private struct ExpandedDashboardView: View {
 
 @MainActor
 private struct BrandMark: View {
-    let compact: Bool
-
     var body: some View {
-        HStack(spacing: compact ? 0 : 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: compact ? 8 : 9, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(red: 0.98, green: 0.43, blue: 0.25), Color(red: 0.96, green: 0.18, blue: 0.53)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                Image(systemName: "sparkles")
-                    .font(.system(size: compact ? 13 : 14, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: compact ? 34 : 32, height: compact ? 34 : 32)
-
-            if !compact {
+        HStack(spacing: 9) {
+            AppGlyph(size: 30)
+            VStack(alignment: .leading, spacing: 0) {
                 Text("SideBarAI")
                     .font(SideBarTheme.title)
                     .foregroundStyle(SideBarTheme.primaryText)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                Text("AI usage at a glance")
+                    .font(SideBarTheme.caption)
+                    .foregroundStyle(SideBarTheme.mutedText)
             }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("SideBarAI")
@@ -1060,7 +1150,7 @@ private struct StatusPill: View {
         case .synced:
             color = SideBarTheme.success
         case .checking, .partial, .setup:
-            color = .orange
+            color = SideBarTheme.warning
         }
         return (syncStatus.label, color)
     }

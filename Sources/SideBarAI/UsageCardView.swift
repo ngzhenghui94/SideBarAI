@@ -6,91 +6,85 @@ struct UsageCardView: View {
     let record: ProviderRecord
     @Environment(\.sideBarLiquidGlassEnabled) private var usesLiquidGlass
 
+    private var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             header
             content
         }
-        .padding(12)
-        .background(
-            usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.elevated,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .sideBarGlassEffect(
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
+        .padding(14)
+        .background {
+            ZStack {
+                cardShape.fill(usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.elevated)
+                cardShape.fill(
+                    LinearGradient(
+                        colors: [record.provider.accentColor.opacity(0.10), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .center
+                    )
+                )
+            }
+        }
+        .sideBarGlassEffect(in: cardShape)
         .overlay {
             if !usesLiquidGlass {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(SideBarTheme.border, lineWidth: 0.8)
+                cardShape.stroke(SideBarTheme.border, lineWidth: 0.8)
             }
         }
         .accessibilityElement(children: .contain)
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(record.provider.accentColor.opacity(0.18))
-                ProviderIcon(
-                    provider: record.provider,
-                    size: 17,
-                    tint: record.provider.accentColor
-                )
-            }
-            .frame(width: 30, height: 30)
-            .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                ProviderTile(provider: record.provider, size: 34)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.provider.displayName)
-                    .font(SideBarTheme.headline)
-                    .foregroundStyle(SideBarTheme.primaryText)
-
-                if let accountLabel {
-                    Text(accountLabel)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(record.provider.displayName)
+                        .font(SideBarTheme.headline)
+                        .foregroundStyle(SideBarTheme.primaryText)
+                    Text(accountLabel ?? sourceLabel)
                         .font(SideBarTheme.caption)
                         .foregroundStyle(SideBarTheme.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
 
-                if let planLabel = record.planStatusLabel {
-                    Text("Plan: \(planLabel)")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(record.provider.accentColor)
-                        .lineLimit(1)
-                }
+                Spacer(minLength: 8)
 
-                if let label = record.state.snapshot?.savedResetLabel {
-                    Text(label)
-                        .font(SideBarTheme.caption)
-                        .foregroundStyle(record.provider.accentColor)
+                if let peak = SideBarTheme.percentLabel(peakPercent) {
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(peak)
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .foregroundStyle(SideBarTheme.usageColor(percentUsed: peakPercent, normal: SideBarTheme.primaryText))
+                            .monospacedDigit()
+                        Text("PEAK USED")
+                            .font(.system(size: 7, weight: .bold, design: .rounded))
+                            .tracking(0.6)
+                            .foregroundStyle(SideBarTheme.mutedText)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Peak quota usage \(peak)")
                 }
-
-                if let label = record.state.snapshot?.subscriptionRenewalLabel() {
-                    Text(label)
-                        .font(SideBarTheme.caption)
-                        .foregroundStyle(SideBarTheme.secondaryText)
-                }
-
-                Text(sourceLabel)
-                    .font(SideBarTheme.caption)
-                    .foregroundStyle(SideBarTheme.secondaryText)
             }
 
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 5) {
                 if record.isActive {
-                    Text("ACTIVE")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .tracking(0.5)
-                        .foregroundStyle(SideBarTheme.success)
+                    Chip(text: "ACTIVE", color: SideBarTheme.success, showsDot: true)
                 }
-                stateBadge
+                if let planLabel = record.planStatusLabel {
+                    Chip(text: planLabel.uppercased(), color: record.provider.accentColor)
+                }
+                stateChip
             }
         }
+    }
+
+    private var peakPercent: Double? {
+        QuotaSummary.highestPercentage(in: [record]).map(Double.init)
     }
 
     private var accountLabel: String? {
@@ -126,9 +120,14 @@ struct UsageCardView: View {
             )
 
         case let .usage(snapshot):
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
                 ForEach(snapshot.windows) { window in
                     UsageWindowRow(window: window, accent: record.provider.accentColor)
+                }
+                ForEach([snapshot.savedResetLabel, snapshot.subscriptionRenewalLabel()].compactMap { $0 }, id: \.self) { label in
+                    Label(label, systemImage: "calendar")
+                        .font(SideBarTheme.caption)
+                        .foregroundStyle(SideBarTheme.secondaryText)
                 }
                 if snapshot.hasModelUsage {
                     ModelUsageSummaryView(
@@ -137,7 +136,7 @@ struct UsageCardView: View {
                     )
                 }
 
-                Text(updatedLabel(snapshot.updatedAt))
+                Text("\(snapshot.sourceLabel) · \(updatedLabel(snapshot.updatedAt))")
                     .font(SideBarTheme.caption)
                     .foregroundStyle(SideBarTheme.mutedText)
             }
@@ -154,20 +153,16 @@ struct UsageCardView: View {
     }
 
     @ViewBuilder
-    private var stateBadge: some View {
+    private var stateChip: some View {
         switch record.state {
         case .loading:
-            Text("CHECKING")
-                .foregroundStyle(SideBarTheme.secondaryText)
+            Chip(text: "CHECKING", color: SideBarTheme.secondaryText)
         case .authenticated:
-            Text("CONNECTED")
-                .foregroundStyle(SideBarTheme.success)
+            Chip(text: "CONNECTED", color: SideBarTheme.success)
         case .unavailable:
-            Text("SETUP")
-                .foregroundStyle(Color.orange)
+            Chip(text: "SETUP", color: SideBarTheme.warning)
         case .usage:
-            Text("USAGE")
-                .foregroundStyle(SideBarTheme.success)
+            EmptyView()
         }
     }
 
@@ -195,47 +190,41 @@ private struct UsageWindowRow: View {
         window.percentUsed.map { min(max($0, 0), 100) / 100 }
     }
 
+    private var levelColor: Color {
+        SideBarTheme.usageColor(percentUsed: window.percentUsed, normal: accent)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(window.label)
-                    .font(SideBarTheme.body)
+                    .font(SideBarTheme.body.weight(.medium))
                     .foregroundStyle(SideBarTheme.primaryText)
 
                 Spacer(minLength: 4)
 
                 Text(valueLabel)
-                    .font(SideBarTheme.caption)
-                    .foregroundStyle(accent)
+                    .font(SideBarTheme.caption.weight(.semibold))
+                    .foregroundStyle(levelColor)
                     .monospacedDigit()
             }
 
             if let progress {
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        Capsule(style: .continuous)
-                            .fill(SideBarTheme.usageTrack)
-                        Capsule(style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [accent.opacity(0.72), accent],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            .frame(width: geometry.size.width * progress)
-                    }
-                }
-                .frame(height: 6)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(window.label)
-                .accessibilityValue(valueLabel)
+                UsageMeterBar(progress: progress, color: levelColor)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(window.label)
+                    .accessibilityValue(valueLabel)
             }
 
             HStack(spacing: 4) {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: "clock")
                     .font(.system(size: 9, weight: .semibold))
                 Text(resetLabel)
+                Spacer(minLength: 4)
+                if let progress {
+                    Text("\(Int(((1 - progress) * 100).rounded()))% left")
+                        .monospacedDigit()
+                }
             }
             .font(SideBarTheme.caption)
             .foregroundStyle(SideBarTheme.mutedText)
@@ -268,24 +257,7 @@ private struct UsageWindowRow: View {
     }
 
     private var resetLabel: String {
-        guard let resetDate = window.resetDate else { return "No reset time reported" }
-        let seconds = resetDate.timeIntervalSinceNow
-        guard seconds.isFinite else {
-            return seconds > 0 ? "Resets in a long time" : "Reset available"
-        }
-        if seconds <= 0 { return "Reset available" }
-
-        guard let minutes = UsageNumberFormatter.truncatedInteger(seconds / 60) else {
-            return "Resets in a long time"
-        }
-        let hours = minutes / 60
-        if hours >= 24 {
-            return "Resets in \(hours / 24)d"
-        }
-        if hours > 0 {
-            return "Resets in \(hours)h \(minutes % 60)m"
-        }
-        return minutes > 0 ? "Resets in \(minutes)m" : "Resets soon"
+        window.resetCountdownLabel
     }
 }
 @MainActor

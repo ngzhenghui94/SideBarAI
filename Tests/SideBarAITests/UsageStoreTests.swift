@@ -246,7 +246,7 @@ struct UsageStoreTests {
     }
 
     @Test
-    func persistedClaudeKeychainAccessDoesNotReadAutomatically() async throws {
+    func persistedClaudeKeychainAccessReadsSilently() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let suiteName = "SideBarAITests.ClaudeKeychainCached.\(UUID().uuidString)"
@@ -274,15 +274,43 @@ struct UsageStoreTests {
 
         #expect(adapter.keychainAccessEnabled)
         #expect(!adapter.keychainAccessAuthorizedForRun)
+        guard case .usage = await adapter.fetch() else {
+            Issue.record("Expected silent Keychain read to recover Claude usage")
+            return
+        }
+        #expect(adapter.keychainAccessAuthorizedForRun)
+        #expect(recorder.values.allSatisfy { !$0 })
+    }
+
+    @Test
+    func deniedSilentClaudeKeychainReadRequiresExplicitAuthorization() async throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let suiteName = "SideBarAITests.ClaudeKeychainDenied.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            Issue.record("Expected test defaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "SideBarAI.claudeKeychainAccessEnabled")
+
+        let recorder = KeychainReaderRecorder(data: nil)
+        let adapter = ClaudeUsageAdapter(
+            credentials: LocalCredentialReader(homeDirectoryURL: home),
+            defaults: defaults,
+            keychainReader: { allowInteraction in
+                recorder.values.append(allowInteraction)
+                return recorder.data
+            }
+        )
+
         #expect(!adapter.isActive)
-        guard case let .unavailable(firstMessage) = await adapter.fetch(),
-              case let .unavailable(secondMessage) = await adapter.fetch() else {
+        guard case let .unavailable(message) = await adapter.fetch() else {
             Issue.record("Expected Claude Keychain access to require explicit authorization")
             return
         }
-        #expect(firstMessage.contains("choose Use Keychain"))
-        #expect(secondMessage.contains("choose Use Keychain"))
-        #expect(recorder.values.isEmpty)
+        #expect(message.contains("choose Use Keychain"))
+        #expect(recorder.values.allSatisfy { !$0 })
     }
 
     @Test
@@ -361,7 +389,7 @@ struct UsageStoreTests {
     }
 
     @Test
-    func failedExplicitClaudeKeychainAuthorizationDoesNotRetryAutomatically() async throws {
+    func failedExplicitClaudeKeychainAuthorizationNeverPromptsAgain() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let suiteName = "SideBarAITests.ClaudeKeychainUnavailable.\(UUID().uuidString)"
@@ -386,7 +414,8 @@ struct UsageStoreTests {
         #expect(!adapter.isActive)
         _ = await adapter.fetch()
         _ = await adapter.fetch()
-        #expect(recorder.values == [true])
+        #expect(recorder.values.first == true)
+        #expect(recorder.values.dropFirst().allSatisfy { !$0 })
     }
 
     @Test
@@ -425,7 +454,6 @@ struct UsageStoreTests {
         #expect(recorder.values == [true])
         #expect(!store.claudeKeychainAccessEnabled)
         #expect(!store.claudeKeychainAuthorizedForRun)
-        #expect(store.keychainAuthorizationMessage?.contains("not authorized") == true)
         guard case let .unavailable(message) = store.record(for: .claude)?.state else {
             Issue.record("Expected expired Claude Keychain credentials to be unavailable")
             return
@@ -1108,6 +1136,7 @@ struct UsageStoreTests {
         )
         let source = OMPUsageSource(
             runner: StubUsageCommandRunner(data: ompData),
+            modelUsageSource: OMPModelUsageSource(sessionsDirectory: home, cacheLifetime: 0),
             cacheLifetime: 60
         )
         let session = fixtureSession(
@@ -1205,6 +1234,33 @@ struct UsageStoreTests {
         #expect(snapshot.windows.count == 2)
         #expect(snapshot.windows.first?.percentUsed == 73)
         #expect(snapshot.windows.first?.label == "5-hour session")
+    }
+
+    @Test
+    func claudeAdapterDoesNotResendRejectedToken() async throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let credentialsURL = home.appendingPathComponent(".claude/.credentials.json")
+        try write("{\"claudeAiOauth\":{\"accessToken\":\"revoked-token\"}}", to: credentialsURL)
+
+        let session = fixtureSession(
+            ["/api/oauth/usage": "{}"],
+            statusCodes: ["/api/oauth/usage": 401]
+        )
+        let adapter = ClaudeUsageAdapter(
+            http: UsageHTTPClient(session: session),
+            credentials: LocalCredentialReader(homeDirectoryURL: home)
+        )
+        _ = await adapter.fetch()
+        guard case .unavailable = await adapter.fetch() else {
+            Issue.record("Expected rejected Claude token to stay unavailable")
+            return
+        }
+        #expect(FixtureURLProtocol.authorizationHeaders == ["Bearer revoked-token"])
+
+        try write("{\"claudeAiOauth\":{\"accessToken\":\"rotated-token\"}}", to: credentialsURL)
+        _ = await adapter.fetch()
+        #expect(FixtureURLProtocol.authorizationHeaders == ["Bearer revoked-token", "Bearer rotated-token"])
     }
 
 

@@ -76,8 +76,8 @@ actor OMPModelUsageSource {
         let credentialPinHash = identity.credentialPinHash
         let provider = identity.provider.lowercased()
 
-        refreshEvents()
         let cutoff = now.addingTimeInterval(-Self.lookbackInterval)
+        refreshEvents(modifiedAfter: cutoff)
         var grouped: [String: ModelUsageAccumulator] = [:]
         var order: [String] = []
         var unattributedRequestCount = 0
@@ -118,7 +118,7 @@ actor OMPModelUsageSource {
             .appendingPathComponent("sessions", isDirectory: true)
     }
 
-    private func refreshEvents() {
+    private func refreshEvents(modifiedAfter cutoff: Date) {
         if let cachedAt, Date().timeIntervalSince(cachedAt) < cacheLifetime { return }
         var sessions: [URL: CachedSession] = [:]
         var order: [URL] = []
@@ -134,7 +134,9 @@ actor OMPModelUsageSource {
         let decoder = JSONDecoder()
         for case let fileURL as URL in enumerator {
             guard fileURL.pathExtension == "jsonl",
-                  let stamp = SessionFileStamp(fileURL) else { continue }
+                  let stamp = SessionFileStamp(fileURL),
+                  // A file last written before the window can't hold events inside it.
+                  stamp.modifiedAt >= cutoff else { continue }
             if let cached = cachedSessions[fileURL], cached.stamp == stamp {
                 sessions[fileURL] = cached
             } else {
@@ -248,6 +250,10 @@ private struct SessionFileStamp: Equatable {
         modifiedNanoseconds = info.st_mtimespec.tv_nsec
         changedSeconds = info.st_ctimespec.tv_sec
         changedNanoseconds = info.st_ctimespec.tv_nsec
+    }
+
+    var modifiedAt: Date {
+        Date(timeIntervalSince1970: TimeInterval(modifiedSeconds) + TimeInterval(modifiedNanoseconds) / 1e9)
     }
 }
 

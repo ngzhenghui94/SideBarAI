@@ -50,6 +50,38 @@ enum SideBarTheme {
     static let usageTrackSubtle = Color.primary.opacity(0.08)
     static let success = Color(red: 0.25, green: 0.92, blue: 0.66)
     static let usageSevenDay = Color(red: 0.28, green: 0.58, blue: 1.0)
+    static let warning = Color.orange
+    static let danger = Color(red: 1.0, green: 0.36, blue: 0.36)
+
+    // Brand palette shared with the app icon.
+    static let brand = Color(hex: "#7C6CFF")
+    static let brandGradient = LinearGradient(
+        colors: [Color(hex: "#3A3F6E"), Color(hex: "#14172E")],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+    /// Faint indigo wash laid over opaque panels so they carry the brand tone in light and dark.
+    static let panelTint = LinearGradient(
+        colors: [brand.opacity(0.13), brand.opacity(0.02)],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    static func meterGradient(_ color: Color) -> LinearGradient {
+        LinearGradient(colors: [color.opacity(0.6), color], startPoint: .leading, endPoint: .trailing)
+    }
+
+    static func percentLabel(_ percentUsed: Double?) -> String? {
+        percentUsed.map { "\(Int(min(max($0, 0), 100).rounded()))%" }
+    }
+
+    /// Escalates to warning/danger at the same 75%/90% marks that trigger quota alerts.
+    static func usageColor(percentUsed: Double?, normal: Color) -> Color {
+        guard let percentUsed else { return normal }
+        if percentUsed >= 90 { return danger }
+        if percentUsed >= 75 { return warning }
+        return normal
+    }
 
     static let title = Font.system(size: 16, weight: .semibold, design: .rounded)
     static let headline = Font.system(size: 13, weight: .semibold, design: .rounded)

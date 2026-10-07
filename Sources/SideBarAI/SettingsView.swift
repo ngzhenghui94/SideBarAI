@@ -532,7 +532,7 @@ struct SettingsView: View {
             return "Enabled for this run. Automatic refreshes reuse the credential and never access Keychain interactively."
         }
         if store.claudeKeychainAccessEnabled {
-            return "Previously enabled. Choose Use Keychain to authorize this run; automatic refreshes never access Keychain."
+            return "Previously enabled. Automatic refreshes read Keychain silently when already allowed; otherwise choose Use Keychain."
         }
         return "Off. SideBarAI will not access the Claude Keychain item unless you choose Use Keychain."
     }

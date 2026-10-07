@@ -84,7 +84,9 @@ rm -rf "$INSTALL_TARGET"
 
 test -f "$INSTALL_TARGET/Contents/Info.plist"
 test -x "$INSTALL_TARGET/Contents/MacOS/SideBarAI"
-test -f "$INSTALL_TARGET/SideBarAI_SideBarAI.bundle/openai.svg" || \
-    test -f "$INSTALL_TARGET/SideBarAI_SideBarAI.bundle/Contents/Resources/openai.svg"
+for asset in claude.svg openai.svg; do
+    test -f "$INSTALL_TARGET/Contents/Resources/SideBarAI_SideBarAI.bundle/Contents/Resources/$asset" || test -f "$INSTALL_TARGET/Contents/Resources/SideBarAI_SideBarAI.bundle/$asset"
+done
+/usr/bin/codesign --verify --strict --verbose=2 "$INSTALL_TARGET"
 printf 'Installed %s\n' "$INSTALL_TARGET"
 printf 'Quit and relaunch SideBarAI to run the new build.\n'

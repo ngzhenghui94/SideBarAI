@@ -601,10 +601,11 @@ struct UsageBoundsTests {
         let second = OMPAccountIdentity(provider: "openai-codex", accountID: "second")
         let firstHash = try #require(first.credentialPinHash)
         let secondHash = try #require(second.credentialPinHash)
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let base = Int(Date().timeIntervalSince1970)
+        let now = Date(timeIntervalSince1970: TimeInterval(base))
         let header = "{\"type\":\"credential_pin\",\"provider\":\"openai-codex\",\"hash\":\"\(firstHash)\"}\n"
         func event(_ tokens: Int) -> String {
-            "{\"type\":\"model_usage\",\"provider\":\"openai-codex\",\"model\":\"model\",\"timestamp\":1800000000,\"usage\":{\"totalTokens\":\(tokens)}}\n"
+            "{\"type\":\"model_usage\",\"provider\":\"openai-codex\",\"model\":\"model\",\"timestamp\":\(base),\"usage\":{\"totalTokens\":\(tokens)}}\n"
         }
         try Data((header + event(10)).utf8).write(to: file)
         let source = OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 0)
@@ -647,14 +648,15 @@ struct UsageBoundsTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let identity = OMPAccountIdentity(provider: "openai-codex", accountID: "window")
         let hash = try #require(identity.credentialPinHash)
+        let base = Int(Date().timeIntervalSince1970)
         let data = """
         {"type":"credential_pin","provider":"openai-codex","hash":"\(hash)"}
-        {"type":"model_usage","provider":"openai-codex","model":"model","timestamp":1800000000,"usage":{"totalTokens":10}}
-        {"type":"model_usage","provider":"openai-codex","model":"model","timestamp":1800000001,"usage":{"totalTokens":20}}
+        {"type":"model_usage","provider":"openai-codex","model":"model","timestamp":\(base),"usage":{"totalTokens":10}}
+        {"type":"model_usage","provider":"openai-codex","model":"model","timestamp":\(base + 1),"usage":{"totalTokens":20}}
         """
         try Data(data.utf8).write(to: root.appendingPathComponent("session.jsonl"))
         let source = OMPModelUsageSource(sessionsDirectory: root, cacheLifetime: 3_600)
-        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let start = Date(timeIntervalSince1970: TimeInterval(base))
         #expect(await source.report(for: identity, now: start).summaries.first?.totalTokens == 10)
         #expect(await source.report(for: identity, now: start.addingTimeInterval(1)).summaries.first?.totalTokens == 30)
         let cutoff = start.addingTimeInterval(OMPModelUsageSource.lookbackInterval)

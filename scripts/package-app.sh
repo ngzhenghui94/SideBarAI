@@ -22,25 +22,24 @@ if [[ ! -x "$PRODUCT" || ! -d "$RESOURCE_BUNDLE" ]]; then
 fi
 
 SIGNING_IDENTITY="${CODESIGN_IDENTITY:--}"
-# SwiftPM's Bundle.module accessor requires the resource bundle beside Contents.
-# Sign the executable before copying it into the app; codesign rejects the
-# required root-level resource bundle when validating the outer app bundle.
-/usr/bin/codesign --force --sign "$SIGNING_IDENTITY" \
-    --identifier "com.icelemontees.SideBarAI" \
-    "$PRODUCT"
-/usr/bin/codesign --verify --strict --verbose=2 "$PRODUCT"
 
 mkdir -p "$DESTINATION"
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
 cp "$ROOT_DIR/Packaging/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$ROOT_DIR/Packaging/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp "$PRODUCT" "$APP_BUNDLE/Contents/MacOS/SideBarAI"
-cp -R "$RESOURCE_BUNDLE" "$APP_BUNDLE/SideBarAI_SideBarAI.bundle"
+cp -R "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/SideBarAI_SideBarAI.bundle"
 chmod +x "$APP_BUNDLE/Contents/MacOS/SideBarAI"
 
 test -f "$APP_BUNDLE/Contents/Info.plist"
 test -x "$APP_BUNDLE/Contents/MacOS/SideBarAI"
-test -f "$APP_BUNDLE/SideBarAI_SideBarAI.bundle/openai.svg" || \
-    test -f "$APP_BUNDLE/SideBarAI_SideBarAI.bundle/Contents/Resources/openai.svg"
+test -f "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+for asset in claude.svg openai.svg; do
+    test -f "$APP_BUNDLE/Contents/Resources/SideBarAI_SideBarAI.bundle/Contents/Resources/$asset" || test -f "$APP_BUNDLE/Contents/Resources/SideBarAI_SideBarAI.bundle/$asset"
+done
+
+/usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --identifier "com.icelemontees.SideBarAI" "$APP_BUNDLE"
+/usr/bin/codesign --verify --strict --verbose=2 "$APP_BUNDLE"
 printf 'Created %s\n' "$APP_BUNDLE"
