@@ -56,6 +56,9 @@ enum CodexModelPricing {
         switch modelID {
         case "gpt-6-astra":
             Rates(input: 10, cachedInput: 1, output: 50, longContext: false, fastMultiplier: 2.5)
+        case "gpt-6.1-sol":
+            // shortcut: API rate (developers.openai.com/api/docs/pricing, 2026-10-09); the rate card was unreachable, and Fast stays unpriced until its multiplier is confirmed.
+            Rates(input: 2, cachedInput: 0.1, output: 10, longContext: true, fastMultiplier: nil)
         case "gpt-6-sol":
             Rates(input: 2, cachedInput: 0.2, output: 10, longContext: true, fastMultiplier: 2.5)
         case "gpt-6-luna":
