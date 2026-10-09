@@ -4,9 +4,9 @@ actor OMPUsageSource {
     private let runner: any UsageCommandRunning
     private let modelUsageSource: OMPModelUsageSource
     private let cacheLifetime: TimeInterval
-    private var cachedReports: [OMPUsageReport]?
+    private var cachedDocument: OMPUsageDocument?
     private var cachedAt: Date?
-    private var inFlight: Task<[OMPUsageReport], Error>?
+    private var inFlight: Task<OMPUsageDocument, Error>?
 
     init(
         runner: any UsageCommandRunning = ProcessUsageCommandRunner(),
@@ -19,41 +19,47 @@ actor OMPUsageSource {
     }
 
     func reports() async throws -> [OMPUsageReport] {
-        if let cachedReports,
-           let cachedAt,
+        try await document().reports
+    }
+
+    func codexAccounts() async throws -> [CodexAccount] {
+        try await document().codexAccounts()
+    }
+
+    private func document() async throws -> OMPUsageDocument {
+        if let cachedDocument, let cachedAt,
            Date().timeIntervalSince(cachedAt) < cacheLifetime {
-            return cachedReports
+            return cachedDocument
         }
-
-        if let inFlight {
-            return try await inFlight.value
-        }
-
+        if let inFlight { return try await inFlight.value }
         let runner = runner
-        let task = Task<[OMPUsageReport], Error> {
+        let task = Task<OMPUsageDocument, Error> {
             let data = try await runner.run()
-            return try OMPUsageParser.parse(data).reports
+            return try OMPUsageParser.parse(data)
         }
         inFlight = task
-
         do {
-            let reports = try await task.value
+            let document = try await task.value
             inFlight = nil
-            cachedReports = reports
+            cachedDocument = document
             cachedAt = Date()
-            return reports
+            return document
         } catch {
             inFlight = nil
+            // A failed command never overwrites the last successful discovery.
             throw error
         }
     }
 
     func snapshot(for account: CodexAccount) async -> UsageSnapshot? {
-        guard let reports = try? await reports(),
-              let report = reports.first(where: { $0.matches(account) }),
-              let snapshot = report.snapshot(for: account) else {
-            return nil
-        }
+        try? await usage(for: account)
+    }
+
+    func usage(for account: CodexAccount) async throws -> UsageSnapshot? {
+        let reports = try await reports()
+        guard let report = reports.lazy.filter({ $0.matches(account) }).max(by: {
+            ($0.fetchedAt?.value ?? 0) < ($1.fetchedAt?.value ?? 0)
+        }), let snapshot = report.snapshot(for: account) else { return nil }
         guard let identity = report.accountIdentity else { return snapshot }
         let modelUsage = await modelUsageSource.report(for: identity)
         return snapshot.withModelUsage(modelUsage)
@@ -71,16 +77,51 @@ actor OMPUsageSource {
 
 struct OMPUsageDocument: Decodable, Sendable {
     let reports: [OMPUsageReport]
+    let accountsWithoutUsage: [OMPUnreportedAccount]
 
     private enum CodingKeys: String, CodingKey {
-        case reports
+        case reports, accountsWithoutUsage
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        reports = try container
-            .decode(LossyDecodableArray<OMPUsageReport>.self, forKey: .reports)
-            .values
+        // Losing an invalid account row would look like a logout to the live store.
+        // Limits within a valid report remain independently salvageable.
+        reports = try container.decode([OMPUsageReport].self, forKey: .reports)
+        accountsWithoutUsage = try container.decodeIfPresent([OMPUnreportedAccount].self, forKey: .accountsWithoutUsage) ?? []
+    }
+
+    func codexAccounts() throws -> [CodexAccount] {
+        var accounts: [CodexAccount] = []
+        var seen = Set<String>()
+        func append(_ metadata: OMPUsageMetadata?) throws {
+            guard let metadata, let account = CodexAccount.from(metadata: metadata) else {
+                throw UsageCommandError.invalidOutput
+            }
+            if seen.insert(account.recordID).inserted { accounts.append(account) }
+        }
+        for report in reports.sorted(by: { ($0.fetchedAt?.value ?? 0) > ($1.fetchedAt?.value ?? 0) })
+            where report.provider.caseInsensitiveCompare("openai-codex") == .orderedSame {
+            try append(report.metadata)
+        }
+        for account in accountsWithoutUsage
+            where account.provider.caseInsensitiveCompare("openai-codex") == .orderedSame {
+            try append(account.metadata)
+        }
+        return accounts.sorted { $0.recordID < $1.recordID }
+    }
+}
+
+struct OMPUnreportedAccount: Decodable, Sendable {
+    let provider: String
+    let metadata: OMPUsageMetadata
+
+    private enum CodingKeys: String, CodingKey { case provider }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decode(String.self, forKey: .provider)
+        metadata = try OMPUsageMetadata(from: decoder)
     }
 }
 
@@ -106,7 +147,7 @@ struct OMPUsageReport: Decodable, Sendable {
         limits = (try? container
             .decodeIfPresent(LossyDecodableArray<OMPUsageLimit>.self, forKey: .limits))?
             .values ?? []
-        metadata = try? container.decode(OMPUsageMetadata.self, forKey: .metadata)
+        metadata = try container.decodeIfPresent(OMPUsageMetadata.self, forKey: .metadata)
         resetCredits = try? container.decode(OMPResetCredits.self, forKey: .resetCredits)
     }
     var accountIdentity: OMPAccountIdentity? {
@@ -149,34 +190,25 @@ struct OMPUsageReport: Decodable, Sendable {
             updatedAt: fetchedAt
                 .flatMap { UsageDateParser.epoch($0.value) }
                 ?? Date(),
-            accountLabel: metadata?.email ?? account.email ?? account.accountLabel,
-            planLabel: metadata?.planType,
+            accountLabel: account.accountLabel ?? account.email,
+            planLabel: metadata?.planType ?? account.planLabel,
             sourceLabel: "OMP usage --json",
             savedResetCount: resetCredits?.availableCount
         )
     }
 
     func matches(_ account: CodexAccount) -> Bool {
-        let expectedAccountID = normalized(account.chatgptAccountID)
-        let reportAccountID = normalized(metadata?.accountId)
-
-        if let expectedAccountID, let reportAccountID {
-            return expectedAccountID == reportAccountID
-        }
-        guard let reportEmail = normalized(metadata?.email) else {
-            return false
-        }
-        let expectedEmail = normalized(account.email)
-            ?? (normalized(account.accountLabel)?.contains("@") == true
-                ? normalized(account.accountLabel)
-                : nil)
-        return expectedEmail?.caseInsensitiveCompare(reportEmail) == .orderedSame
-    }
-
-    private func normalized(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard provider.caseInsensitiveCompare("openai-codex") == .orderedSame,
+              let metadata else { return false }
+        let identity = OMPAccountIdentity(
+            provider: "openai-codex",
+            accountID: metadata.accountId,
+            email: metadata.email?.lowercased(),
+            organizationID: metadata.organizationID,
+            projectID: metadata.projectID
+        )
+        // No email/account-ID fallback: both the user and workspace must agree.
+        return (identity.accountID != nil || identity.email != nil) && identity == account.identity
     }
 
     private func uniqueWindowID(_ id: String, usedIDs: inout Set<String>) -> String {
@@ -353,26 +385,25 @@ struct OMPUsageMetadata: Decodable, Sendable {
     let email: String?
     let accountId: String?
     let organizationID: String?
+    let organizationName: String?
     let projectID: String?
 
     private enum CodingKeys: String, CodingKey {
-        case planType
-        case allowed
-        case limitReached
-        case email
-        case accountId
+        case planType, allowed, limitReached, email, accountId
         case organizationID = "orgId"
+        case organizationName = "orgName"
         case projectID = "projectId"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        planType = try container.decodeIfPresent(String.self, forKey: .planType)
-        allowed = try container.decodeIfPresent(Bool.self, forKey: .allowed)
-        limitReached = try container.decodeIfPresent(Bool.self, forKey: .limitReached)
+        planType = try? container.decode(String.self, forKey: .planType)
+        allowed = try? container.decode(Bool.self, forKey: .allowed)
+        limitReached = try? container.decode(Bool.self, forKey: .limitReached)
         email = try container.decodeIfPresent(String.self, forKey: .email)
         accountId = try container.decodeIfPresent(String.self, forKey: .accountId)
         organizationID = try container.decodeIfPresent(String.self, forKey: .organizationID)
+        organizationName = try? container.decode(String.self, forKey: .organizationName)
         projectID = try container.decodeIfPresent(String.self, forKey: .projectID)
     }
 }

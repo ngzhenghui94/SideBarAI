@@ -205,6 +205,34 @@ struct AppSettingsTests {
     }
 
     @Test
+    func slimRailPreferencePersists() {
+        let suiteName = "SideBarAITests.SlimRail.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            Issue.record("Expected test defaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = UsageStore(
+            adapters: [],
+            defaults: defaults,
+            refreshInterval: .seconds(60 * 60)
+        )
+        #expect(!store.slimRailEnabled)
+        store.setSlimRailEnabled(true)
+        #expect(store.slimRailEnabled)
+        store.shutdown()
+
+        let reloadedStore = UsageStore(
+            adapters: [],
+            defaults: defaults,
+            refreshInterval: .seconds(60 * 60)
+        )
+        defer { reloadedStore.shutdown() }
+        #expect(reloadedStore.slimRailEnabled)
+    }
+
+    @Test
     func attachedPeekAppearsInsideTheScreenForEveryEdge() {
         let visibleFrame = CGRect(x: 100, y: 50, width: 1_000, height: 700)
         let panelSize = CGSize(width: 80, height: 200)

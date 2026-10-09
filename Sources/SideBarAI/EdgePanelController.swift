@@ -294,6 +294,12 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
         static let compactProviderHeight: CGFloat = 62
         static let compactProviderSpacing: CGFloat = 8
         static let minimumCompactHeight: CGFloat = 140
+        // Slim rail: padding (16), handle (18), scroll padding (10), gap (6), button (24).
+        static let slimCollapsedWidth: CGFloat = 44
+        static let slimBaseHeight: CGFloat = 74
+        static let slimProviderHeight: CGFloat = 46
+        static let slimProviderSpacing: CGFloat = 6
+        static let minimumSlimHeight: CGFloat = 120
         static let peekHeight: CGFloat = 384
         static let peekMaximumHeight: CGFloat = 520
         static let expandedHeight: CGFloat = 640
@@ -881,6 +887,7 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
             _ = store.presentationRecords
             _ = store.sidebarEdge
             _ = store.liquidGlassEnabled
+            _ = store.slimRailEnabled
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, !self.isShuttingDown else { return }
@@ -897,12 +904,13 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
     }
 
     private var compactHeight: CGFloat {
+        let isSlim = store.slimRailEnabled
         let accountCount = store.compactRecords.count
         let spacingCount = max(accountCount - 1, 0)
-        let contentHeight = Metrics.compactBaseHeight
-            + CGFloat(accountCount) * Metrics.compactProviderHeight
-            + CGFloat(spacingCount) * Metrics.compactProviderSpacing
-        return max(Metrics.minimumCompactHeight, contentHeight)
+        let contentHeight = (isSlim ? Metrics.slimBaseHeight : Metrics.compactBaseHeight)
+            + CGFloat(accountCount) * (isSlim ? Metrics.slimProviderHeight : Metrics.compactProviderHeight)
+            + CGFloat(spacingCount) * (isSlim ? Metrics.slimProviderSpacing : Metrics.compactProviderSpacing)
+        return max(isSlim ? Metrics.minimumSlimHeight : Metrics.minimumCompactHeight, contentHeight)
     }
 
     private func size(for visibleSize: CGSize) -> CGSize {
@@ -913,7 +921,7 @@ final class EdgePanelController: NSObject, NSWindowDelegate {
             requestedWidth = Metrics.expandedWidth
             requestedHeight = Metrics.expandedHeight
         } else {
-            requestedWidth = Metrics.collapsedWidth
+            requestedWidth = store.slimRailEnabled ? Metrics.slimCollapsedWidth : Metrics.collapsedWidth
             requestedHeight = compactHeight
         }
 

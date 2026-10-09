@@ -4,12 +4,13 @@ SideBarAI is a native macOS menu-bar utility with an edge-attached, expandable s
 
 ## Features
 
-- Usage windows, percentages, reset times, and account or plan labels, plus Codex subscription renewal dates read from the ChatGPT login token (hidden once passed, since the token only refreshes at login).
+- Usage windows, percentages, reset times, and account or plan labels.
 - Local OMP model token totals (including cached input) for the last 30 days, with Codex and Claude cost estimates calculated from published OpenAI and Anthropic rates—not saved dollar amounts or subscription bills.
 - Manual refresh or scheduled refresh every 1, 5, 15, or 30 minutes, or hourly.
 - Menu-bar controls for showing or hiding the sidebar, compact or expanded views, and attachment to the left, right, top, or bottom screen edge.
 - Provider enable/disable and visibility controls.
 - Optional consolidation of multiple discovered Codex accounts into one weighted quota.
+- Codex accounts discovered from your existing OMP logins on each refresh; no separate login manager or credential copies.
 - Configurable startup state, optional Liquid Glass styling, launch at login, and quota alerts.
 
 ## Supported providers
@@ -18,8 +19,8 @@ Sign in to the provider CLIs first. SideBarAI reads authenticated usage from the
 
 | Provider | Authentication and requirements |
 | --- | --- |
-| Claude Code | Claude Code OAuth. Run `claude` and complete sign-in. |
-| ChatGPT / Codex | Codex CLI OAuth. Sign in with `codex login`. Multiple discovered Codex accounts are supported. |
+| Claude Code | Claude Code OAuth. Run `claude` and complete sign-in. Extra logins made with `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` appear as separate cards after relaunch. |
+| ChatGPT / Codex | Existing OMP logins. Open `omp`, use `/login` for Codex, then refresh SideBarAI. |
 | Antigravity CLI | Run `agy` and complete sign-in. Usage reporting requires `agy` 1.1.11 or newer. |
 
 ## Install from source
@@ -65,6 +66,19 @@ open /Applications/SideBarAI.app
 open "$HOME/Applications/SideBarAI.app"
 ```
 
+## Codex accounts through OMP
+
+Sign in once in OMP. SideBarAI discovers accounts and usage through `omp usage --json`; it does not read or modify Codex credential files. There is no separate `sidebarai` login CLI.
+
+1. Open `omp` and use `/login` to add your Codex accounts.
+2. Refresh SideBarAI, or wait for its scheduled refresh.
+
+OMP owns authentication and account selection. Account changes appear on refresh without restarting SideBarAI. Failed discovery keeps known accounts with an explicit unavailable state rather than treating the failure as logout. Accounts without quota data remain visible as unavailable.
+
+OMP must be installed and discoverable by the app. The app uses its existing executable search paths, including common user-local and Homebrew locations. OMP does not report which login is active, so SideBarAI does not guess or mark an account active. Subscription renewal dates are no longer read from Codex tokens.
+
+The former custom CLI has been removed. Previously saved files under `~/.codex/accounts` are left untouched but are no longer used by SideBarAI. Accounts saved only there must also be signed in through OMP to appear.
+
 ## First launch
 
 1. Sign in to the provider CLIs you want to monitor.
@@ -81,7 +95,7 @@ swift test
 swift build -c release
 ```
 
-The test suite is in `Tests/SideBarAITests`.
+The test suite is in `Tests/SideBarAITests`; OMP account tests use synthetic reports rather than real credentials.
 
 To create an app bundle without installing it:
 
@@ -103,7 +117,7 @@ The script submits the app, waits for Apple's verdict (printing the log on rejec
 
 ## Privacy and credentials
 
-SideBarAI is a local usage monitor. Credentials remain managed by each provider CLI. Claude may optionally use macOS Keychain access after you authorize it in Settings. Background reads disable both LocalAuthentication interaction and legacy login-Keychain dialogs. If access needs approval, usage remains unavailable until you choose **Use Keychain**; refreshes do not request your password. Already-authorized credentials can still be picked up silently after Claude Code rotates them. The legacy interaction guard uses deprecated Security APIs because Claude Code stores its item in the login Keychain, not the Data Protection keychain.
+SideBarAI monitors usage without managing credentials. Codex account discovery and usage are delegated to OMP; SideBarAI does not copy its tokens. Claude may optionally use macOS Keychain access after you authorize it in Settings. Background reads disable both LocalAuthentication interaction and legacy login-Keychain dialogs. If access needs approval, usage remains unavailable until you choose **Use Keychain**; refreshes do not request your password. Already-authorized credentials can still be picked up silently after Claude Code rotates them. The legacy interaction guard uses deprecated Security APIs because Claude Code stores its item in the login Keychain, not the Data Protection keychain.
 
 If **Use Keychain** fails, Settings distinguishes a macOS Security error (with its numeric code) from a successful Keychain read containing an expired or invalid Claude login. For the latter, sign in again using `claude`, then retry **Use Keychain**. No credential contents are shown.
 

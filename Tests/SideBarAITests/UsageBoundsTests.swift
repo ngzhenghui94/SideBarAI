@@ -214,7 +214,8 @@ struct UsageBoundsTests {
             accountLabel: "owner@example.com",
             email: "owner@example.com",
             isActive: true,
-            chatgptAccountID: "account-123"
+            chatgptAccountID: "account-123",
+            organizationID: "org-123"
         )
         let usageSource = OMPUsageSource(
             runner: FixtureUsageCommandRunner(data: Data(ompData.utf8)),
@@ -432,7 +433,8 @@ struct UsageBoundsTests {
             accountLabel: "owner@example.com",
             email: "owner@example.com",
             isActive: true,
-            chatgptAccountID: "account-123"
+            chatgptAccountID: "account-123",
+            organizationID: "org-123"
         )
         let source = OMPUsageSource(
             runner: FixtureUsageCommandRunner(data: Data(ompData.utf8)),

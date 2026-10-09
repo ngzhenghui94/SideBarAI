@@ -184,11 +184,9 @@ struct UsageStoreTests {
             keychainReader: { _ in nil }
         )
         let antigravity = AntigravityUsageAdapter()
-        let codex = CodexUsageAdapter(credentials: reader)
 
         #expect(!claude.isActive)
         #expect(!antigravity.isActive)
-        #expect(!codex.isActive)
 
         try write(
             "{\"claudeAiOauth\":{\"accessToken\":\"expired-token\",\"expiresAt\":1}}",
@@ -922,140 +920,75 @@ struct UsageStoreTests {
     }
 
     @Test
-    func codexCredentialFailuresExplainRecovery() async throws {
+    func ompAccountsProduceIndependentLiveRecordsWithoutLocalCredentials() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let reader = LocalCredentialReader(homeDirectoryURL: home)
-        let adapter = CodexUsageAdapter(credentials: reader)
-        #expect(!adapter.isActive)
-
-        guard case let .unavailable(missingMessage) = await adapter.fetch() else {
-            Issue.record("Expected missing Codex credentials to be unavailable")
-            return
-        }
-        #expect(missingMessage.contains("Credential file not found"))
-        #expect(missingMessage.contains("codex login"))
-
-        try write("not-json", to: home.appendingPathComponent(".codex/auth.json"))
-        guard case let .unavailable(unreadableMessage) = await adapter.fetch() else {
-            Issue.record("Expected malformed Codex credentials to be unavailable")
-            return
-        }
-        #expect(unreadableMessage.contains("Credential JSON unreadable"))
-
-        try write("{\"tokens\":{}}", to: home.appendingPathComponent(".codex/auth.json"))
-        guard case let .unavailable(tokenMessage) = await adapter.fetch() else {
-            Issue.record("Expected tokenless Codex credentials to be unavailable")
-            return
-        }
-        #expect(tokenMessage.contains("no usable access token"))
-
-        #expect(ProviderFailureMessage.transport(.unauthorized, provider: "Codex", command: "codex login").contains("HTTP 401"))
-        #expect(ProviderFailureMessage.transport(.forbidden, provider: "Codex", command: "codex login").contains("HTTP 403"))
-        #expect(ProviderFailureMessage.transport(.invalidPayload, provider: "Codex", command: "codex login").contains("payload changed"))
-    }
-
-    @Test
-    func codexAuthRegistryProducesIndependentLiveRecords() async throws {
-        let home = try makeHome()
-        defer { try? FileManager.default.removeItem(at: home) }
-        let firstKey = "account-one"
-        let secondKey = "account-two"
-        try write(
-            "{\"schema_version\":3,\"active_account_key\":\"account-two\",\"accounts\":[{\"account_key\":\"account-one\",\"email\":\"one@example.com\",\"alias\":\"Work\",\"chatgpt_account_id\":\"chat-one\",\"plan\":\"plus\"},{\"account_key\":\"account-two\",\"email\":\"two@example.com\",\"alias\":\"\",\"chatgpt_account_id\":\"chat-two\",\"plan\":\"pro\"}]}",
-            to: home.appendingPathComponent(".codex/accounts/registry.json")
+        let name = "SideBarAITests.OMPAccounts.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        // Use a separate suite and disable all automatic work outside the injected fixtures.
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let data = Data(#"{"reports":[{"provider":"openai-codex","metadata":{"email":"one@example.com","accountId":"chat-one","planType":"plus"},"limits":[{"id":"primary","label":"5 hours","amount":{"used":15,"limit":100,"unit":"percent"},"status":"ok"}]},{"provider":"openai-codex","metadata":{"email":"two@example.com","accountId":"chat-two","planType":"pro"},"limits":[{"id":"primary","label":"5 hours","amount":{"used":42,"limit":100,"unit":"percent"},"status":"ok"}]}]}"#.utf8)
+        let source = OMPUsageSource(
+            runner: StubUsageCommandRunner(data: data),
+            modelUsageSource: OMPModelUsageSource(sessionsDirectory: home), cacheLifetime: 60
         )
-        try write(
-            "{\"tokens\":{\"access_token\":\"token-one\",\"account_id\":\"chat-one\"}}",
-            to: home.appendingPathComponent(".codex/accounts/\(codexAuthFilename(for: firstKey)).auth.json")
+        let store = UsageStore(
+            adapters: [StubAdapter(provider: .claude, state: .unavailable(message: "fixture")),
+                       StubAdapter(provider: .antigravity, state: .unavailable(message: "fixture"))],
+            defaults: defaults, refreshInterval: .zero,
+            codexAdaptersFactory: { try await DefaultUsageAdapters.makeCodex(ompUsageSource: source) }
         )
-        try write(
-            "{\"tokens\":{\"access_token\":\"token-two\",\"account_id\":\"chat-two\"}}",
-            to: home.appendingPathComponent(".codex/accounts/\(codexAuthFilename(for: secondKey)).auth.json")
-        )
-
-        let reader = LocalCredentialReader(homeDirectoryURL: home)
-        let accounts = CodexAccount.discover(credentials: reader)
-        #expect(accounts.count == 2)
-        #expect(accounts.filter(\.isActive).count == 1)
-        #expect(accounts.first(where: { $0.accountKey == firstKey })?.accountLabel == "Work")
-        #expect(accounts.first(where: { $0.accountKey == secondKey })?.isActive == true)
-
-        let factoryCodexAdapters = DefaultUsageAdapters.make(credentials: reader).filter { $0.provider == .chatgpt }
-        #expect(factoryCodexAdapters.count == 2)
-        #expect(factoryCodexAdapters.map(\.planLabel) == ["plus", "pro"])
-
-        let session = fixtureSession([
-            "/backend-api/wham/usage": "{\"plan_type\":\"pro\",\"rate_limit\":{\"primary_window\":{\"used_percent\":15,\"reset_at\":1735401600,\"limit_window_seconds\":18000}}}"
-        ])
-        let codexAdapters: [any UsageProviderAdapter] = accounts.map {
-            CodexUsageAdapter(account: $0, http: UsageHTTPClient(session: session), credentials: reader)
-        }
-        let adapters: [any UsageProviderAdapter] = codexAdapters + [
-            StubAdapter(provider: .claude, state: .unavailable(message: "No credentials")),
-            StubAdapter(provider: .antigravity, state: .unavailable(message: "No credentials"))
-        ]
-        let store = UsageStore(adapters: adapters)
-
+        defer { store.shutdown() }
         await waitForRefresh(store)
-
         let codexRecords = store.records(for: .chatgpt)
         #expect(codexRecords.count == 2)
-        #expect(codexRecords.filter(\.isActive).count == 1)
+        #expect(Set(codexRecords.map(\.recordID)).count == 2)
+        #expect(codexRecords.allSatisfy { !$0.isActive && $0.hasUsableCredentials })
+        #expect(Set(codexRecords.compactMap(\.accountLabel)) == ["one@example.com", "two@example.com"])
+        #expect(Set(codexRecords.compactMap(\.planLabel)) == ["plus", "pro"])
         #expect(codexRecords.allSatisfy { if case .usage = $0.state { true } else { false } })
-        #expect(Set(FixtureURLProtocol.authorizationHeaders) == ["Bearer token-one", "Bearer token-two"])
-        #expect(Set(FixtureURLProtocol.accountHeaders) == ["chat-one", "chat-two"])
     }
+
 
     @Test
-    func activeCodexAccountUsesFreshLegacyLoginFile() async throws {
+    func codexRediscoveryAndClaudeFetchShareOMPReportCache() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let accountKey = "active-account"
-
-        try write(
-            """
-            {"schema_version":3,"active_account_key":"active-account","accounts":[{"account_key":"active-account","email":"active@example.com","chatgpt_account_id":"chat-active","plan":"plus"}]}
-            """,
-            to: home.appendingPathComponent(".codex/accounts/registry.json")
+        let name = "SideBarAITests.OMPSharedCache.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        try write(#"{"claudeAiOauth":{"accessToken":"fixture-token"}}"#,
+                  to: home.appendingPathComponent(".claude/.credentials.json"))
+        let data = Data(#"{"reports":[{"provider":"openai-codex","metadata":{"email":"owner@example.com","accountId":"account-one","planType":"plus"},"limits":[{"id":"primary","label":"5 hours","amount":{"used":15,"limit":100,"unit":"percent"},"status":"ok"}]},{"provider":"anthropic","metadata":{"email":"claude@example.com"},"limits":[]}]}"#.utf8)
+        let runner = CountingUsageCommandRunner(data: data)
+        let source = OMPUsageSource(
+            runner: runner, modelUsageSource: OMPModelUsageSource(sessionsDirectory: home), cacheLifetime: 60
         )
-        try write(
-            """
-            {"tokens":{"access_token":"stale-token","account_id":"chat-active"}}
-            """,
-            to: home.appendingPathComponent(".codex/accounts/\(codexAuthFilename(for: accountKey)).auth.json")
+        let claude = ClaudeUsageAdapter(
+            http: UsageHTTPClient(session: fixtureSession([
+                "/api/oauth/usage": #"{"five_hour":{"utilization":42}}"#
+            ])),
+            credentials: LocalCredentialReader(homeDirectoryURL: home), defaults: defaults,
+            keychainReader: { _ in nil }, ompUsageSource: source
         )
-        try write(
-            """
-            {"tokens":{"access_token":"fresh-token","account_id":"chat-active"}}
-            """,
-            to: home.appendingPathComponent(".codex/auth.json")
+        let store = UsageStore(
+            adapters: [claude], defaults: defaults, refreshInterval: .zero,
+            codexAdaptersFactory: { try await DefaultUsageAdapters.makeCodex(ompUsageSource: source) }
         )
-
-        let reader = LocalCredentialReader(homeDirectoryURL: home)
-        guard let account = CodexAccount.discover(credentials: reader).first else {
-            Issue.record("Expected active Codex account")
-            return
-        }
-
-        let session = fixtureSession([
-            "/backend-api/wham/usage": """
-            {"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":15,"reset_at":1735401600,"limit_window_seconds":18000}}}
-            """
-        ])
-        let adapter = CodexUsageAdapter(
-            account: account,
-            http: UsageHTTPClient(session: session),
-            credentials: reader
-        )
-
-        guard case .usage = await adapter.fetch() else {
-            Issue.record("Expected refreshed Codex credentials to authorize usage")
-            return
-        }
-        #expect(FixtureURLProtocol.authorizationHeaders == ["Bearer fresh-token"])
-        #expect(FixtureURLProtocol.accountHeaders == ["chat-active"])
+        defer { store.shutdown() }
+        await waitForRefresh(store)
+        #expect(store.records(for: .chatgpt).count == 1)
+        #expect(store.record(for: .claude)?.state.errorMessage == nil)
+        #expect(await runner.callCount == 1)
+        let ids = store.records.map(\.recordID)
+        store.refresh()
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ids)
+        #expect(await runner.callCount == 1)
     }
+
 
     @Test
     func ompUsageJSONMapsCodexReport() throws {
@@ -1113,98 +1046,26 @@ struct UsageStoreTests {
     }
 
     @Test
-    func codexAdapterFallsBackToOMPUsageJSONAfterDirectFailure() async throws {
+    func codexAdapterUsesOMPUsageJSONOnly() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try write(
-            #"""
-            {"schema_version":3,"active_account_key":"active-account","accounts":[{"account_key":"active-account","email":"owner@example.com","chatgpt_account_id":"account-123","plan":"plus"}]}
-            """#,
-            to: home.appendingPathComponent(".codex/accounts/registry.json")
-        )
-        try write(
-            #"""
-            {"tokens":{"access_token":"direct-token","account_id":"account-123"}}
-            """#,
-            to: home.appendingPathComponent(".codex/auth.json")
-        )
-
-        let ompData = Data(
-            #"""
-            {"reports":[{"provider":"openai-codex","fetchedAt":1788335266190,"limits":[{"id":"openai-codex:primary","label":"5 hours","window":{"durationMs":18000000,"resetsAt":1788339647000},"amount":{"used":74,"limit":100,"unit":"percent"},"status":"ok"}],"metadata":{"planType":"plus","email":"owner@example.com","accountId":"account-123"}}]}
-            """#.utf8
-        )
+        let ompData = Data(#"{"reports":[{"provider":"openai-codex","limits":[{"id":"primary","label":"5 hours","amount":{"used":74,"limit":100,"unit":"percent"},"status":"ok"}],"metadata":{"planType":"plus","email":"owner@example.com","accountId":"account-123"}}]}"#.utf8)
         let source = OMPUsageSource(
             runner: StubUsageCommandRunner(data: ompData),
-            modelUsageSource: OMPModelUsageSource(sessionsDirectory: home, cacheLifetime: 0),
-            cacheLifetime: 60
+            modelUsageSource: OMPModelUsageSource(sessionsDirectory: home), cacheLifetime: 60
         )
-        let session = fixtureSession(
-            ["/backend-api/wham/usage": "{}"],
-            statusCodes: ["/backend-api/wham/usage": 401]
-        )
-        let reader = LocalCredentialReader(homeDirectoryURL: home)
-        guard let account = CodexAccount.discover(credentials: reader).first else {
-            Issue.record("Expected active Codex account")
-            return
-        }
-        let adapter = CodexUsageAdapter(
-            account: account,
-            http: UsageHTTPClient(session: session),
-            credentials: reader,
-            ompUsageSource: source
-        )
-
+        let adapters = try await DefaultUsageAdapters.makeCodex(ompUsageSource: source)
+        let adapter = try #require(adapters.first)
         guard case let .usage(snapshot) = await adapter.fetch() else {
-            Issue.record("Expected OMP usage fallback after direct 401")
+            Issue.record("Expected OMP usage snapshot")
             return
         }
         #expect(snapshot.windows.first?.used == 74)
         #expect(snapshot.sourceLabel == "OMP usage --json")
-        #expect(FixtureURLProtocol.authorizationHeaders == ["Bearer direct-token"])
+        #expect(snapshot.planLabel == "plus")
     }
 
-    @Test
-    func codexAdapterMapsWhamUsageWindows() async throws {
-        let home = try makeHome()
-        defer { try? FileManager.default.removeItem(at: home) }
-        // Real ChatGPT ID tokens use a "+00:00" offset for the paid-through date.
-        let claims = #"{"https://api.openai.com/auth":{"chatgpt_subscription_active_until":"2030-10-17T01:41:06+00:00"}}"#
-        let idToken = "e30." + Data(claims.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "") + ".sig"
-        try write(
-            "{\"tokens\":{\"access_token\":\"fixture-token\",\"account_id\":\"account-123\",\"id_token\":\"\(idToken)\"}}",
-            to: home.appendingPathComponent(".codex/auth.json")
-        )
 
-        let session = fixtureSession([
-            "/backend-api/wham/usage": """
-            {"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":15,"reset_at":1735401600,"limit_window_seconds":18000},"secondary_window":{"used_percent":5,"reset_at":1735920000,"limit_window_seconds":604800}}}
-            """
-        ])
-        let adapter = CodexUsageAdapter(
-            http: UsageHTTPClient(session: session),
-            credentials: LocalCredentialReader(homeDirectoryURL: home)
-        )
-        #expect(adapter.isActive)
-        let state = await adapter.fetch()
-
-        guard case let .usage(snapshot) = state else {
-            Issue.record("Expected Codex usage snapshot, got \(state)")
-            return
-        }
-        #expect(snapshot.windows.count == 2)
-        #expect(snapshot.windows.first?.percentUsed == 15)
-        #expect(snapshot.windows.first?.label == "5-hour window")
-        #expect(snapshot.planLabel == "pro")
-        #expect(AccountPlanLabel.displayName(for: snapshot.planLabel) == "Pro")
-        let renewal = try #require(snapshot.subscriptionRenewsAt)
-        #expect(renewal == Date(timeIntervalSince1970: 1_918_431_666))
-        #expect(snapshot.subscriptionRenewalLabel(now: renewal.addingTimeInterval(-1)) != nil)
-        // The claim only refreshes at login, so a passed date is stale and hidden.
-        #expect(snapshot.subscriptionRenewalLabel(now: renewal) == nil)
-    }
 
     @Test
     func claudeAdapterMapsOAuthUsageWindows() async throws {
@@ -1331,15 +1192,6 @@ struct UsageStoreTests {
         try Data(content.utf8).write(to: url)
     }
 
-    private func codexAuthFilename(for accountKey: String) -> String {
-        var encoded = Data(accountKey.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-        while encoded.last == "=" {
-            encoded.removeLast()
-        }
-        return encoded
-    }
 
     private func fixtureSession(
         _ fixtures: [String: String],
@@ -1349,7 +1201,6 @@ struct UsageStoreTests {
         FixtureURLProtocol.fixtures = fixtures.mapValues { Data($0.utf8) }
         FixtureURLProtocol.statusCodes = statusCodes
         FixtureURLProtocol.authorizationHeaders = []
-        FixtureURLProtocol.accountHeaders = []
         configuration.protocolClasses = [FixtureURLProtocol.self]
         return URLSession(configuration: configuration)
     }
@@ -1424,7 +1275,6 @@ private final class KeychainReaderRecorder: @unchecked Sendable {
 private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var fixtures: [String: Data] = [:]
     nonisolated(unsafe) static var authorizationHeaders: [String] = []
-    nonisolated(unsafe) static var accountHeaders: [String] = []
     nonisolated(unsafe) static var statusCodes: [String: Int] = [:]
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -1438,9 +1288,6 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         if let authorization = request.value(forHTTPHeaderField: "Authorization") {
             Self.authorizationHeaders.append(authorization)
-        }
-        if let account = request.value(forHTTPHeaderField: "ChatGPT-Account-Id") {
-            Self.accountHeaders.append(account)
         }
 
         guard let url = request.url,
@@ -1490,3 +1337,16 @@ private struct StubUsageCommandRunner: UsageCommandRunning {
         data
     }
 }
+
+private actor CountingUsageCommandRunner: UsageCommandRunning {
+    let data: Data
+    private(set) var callCount = 0
+
+    init(data: Data) { self.data = data }
+
+    func run() async throws -> Data {
+        callCount += 1
+        return data
+    }
+}
+

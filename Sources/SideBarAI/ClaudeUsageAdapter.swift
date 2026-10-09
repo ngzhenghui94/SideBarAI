@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
@@ -59,7 +60,11 @@ private final class ClaudeCredentialCache: @unchecked Sendable {
 struct ClaudeUsageAdapter: UsageProviderAdapter {
     private static let keychainAccessDefaultsKey = "SideBarAI.claudeKeychainAccessEnabled"
 
+    static let defaultConfigDirectory = ".claude"
+
     let provider: Provider = .claude
+    /// Claude Code config directory relative to home, as passed via `CLAUDE_CONFIG_DIR`.
+    let configDirectory: String
 
     private let http: UsageHTTPClient
     private let credentials: LocalCredentialReader
@@ -72,15 +77,78 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         http: UsageHTTPClient = UsageHTTPClient(),
         credentials: LocalCredentialReader = LocalCredentialReader(),
         defaults: UserDefaults = .standard,
-        keychainReader: @escaping @Sendable (Bool) throws -> Data? = ClaudeUsageAdapter.readKeychainData,
+        configDirectory: String = ClaudeUsageAdapter.defaultConfigDirectory,
+        keychainReader: (@Sendable (Bool) throws -> Data?)? = nil,
         ompUsageSource: OMPUsageSource? = nil
     ) {
         self.http = http
         self.credentials = credentials
         self.defaults = UserDefaultsBox(defaults)
-        self.keychainReader = keychainReader
+        self.configDirectory = configDirectory
+        let service = Self.keychainService(
+            configDirectory: configDirectory,
+            homeDirectoryURL: credentials.homeDirectoryURL
+        )
+        self.keychainReader = keychainReader ?? {
+            try ClaudeUsageAdapter.readKeychainData(service: service, allowInteraction: $0)
+        }
         self.credentialCache = ClaudeCredentialCache()
         self.ompUsageSource = ompUsageSource
+    }
+
+    private var isDefaultAccount: Bool { configDirectory == Self.defaultConfigDirectory }
+
+    /// Suffix after `.claude-`, e.g. "personal" for `~/.claude-personal`.
+    private var accountName: String? {
+        isDefaultAccount ? nil : String(configDirectory.trimmingPrefix(".claude-"))
+    }
+
+    var recordID: String { accountName.map { "claude:\($0)" } ?? provider.rawValue }
+    var accountLabel: String? { accountName }
+
+    private var credentialsPath: String { "~/\(configDirectory)/.credentials.json" }
+    private var signInCommand: String {
+        isDefaultAccount ? "claude" : "CLAUDE_CONFIG_DIR=~/\(configDirectory) claude"
+    }
+
+    /// Claude Code suffixes the Keychain service with the first 8 hex chars of
+    /// sha256(absolute config dir) whenever `CLAUDE_CONFIG_DIR` is set.
+    static func keychainService(configDirectory: String, homeDirectoryURL: URL) -> String {
+        guard configDirectory != defaultConfigDirectory else { return "Claude Code-credentials" }
+        let path = homeDirectoryURL.appendingPathComponent(configDirectory).path
+        let hex = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", Int($0)) }.joined()
+        return "Claude Code-credentials-\(hex.prefix(8))"
+    }
+
+    /// `~/.claude` plus every `~/.claude-*` directory that holds a Claude Code login.
+    static func discoverConfigDirectories(homeDirectoryURL: URL) -> [String] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: homeDirectoryURL.path)) ?? []
+        let extras = names.filter { name in
+            var isDirectory: ObjCBool = false
+            let dir = homeDirectoryURL.appendingPathComponent(name)
+            guard name.hasPrefix(".claude-"),
+                  FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return false }
+            return FileManager.default.fileExists(atPath: dir.appendingPathComponent(".credentials.json").path)
+                || keychainItemExists(service: keychainService(configDirectory: name, homeDirectoryURL: homeDirectoryURL))
+        }
+        return [defaultConfigDirectory] + extras.sorted()
+    }
+
+    private static func keychainItemExists(service: String) -> Bool {
+        // Attribute-only lookup: never reads the secret, so never prompts.
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseAuthenticationContext: context
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
     }
 
     var keychainAccessEnabled: Bool {
@@ -114,15 +182,15 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         let oauth: ClaudeOAuthCredentials
         switch loadOAuthCredentials() {
         case let .failure(issue):
-            return .unavailable(message: ProviderFailureMessage.credential(issue, command: "claude"))
+            return .unavailable(message: ProviderFailureMessage.credential(issue, command: signInCommand))
         case let .success(value):
             oauth = value
         }
 
         guard let accessToken = nonEmpty(oauth.accessToken) else {
             return .unavailable(message: ProviderFailureMessage.credential(
-                .accessTokenMissing(path: "~/.claude/.credentials.json"),
-                command: "claude"
+                .accessTokenMissing(path: credentialsPath),
+                command: signInCommand
             ))
         }
 
@@ -130,15 +198,15 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
             guard let expiryDate = UsageDateParser.epoch(expiresAt) else {
                 credentialCache.clear()
                 return .unavailable(message: ProviderFailureMessage.credential(
-                    .jsonUnreadable(path: "~/.claude/.credentials.json"),
-                    command: "claude"
+                    .jsonUnreadable(path: credentialsPath),
+                    command: signInCommand
                 ))
             }
             if expiryDate <= Date().addingTimeInterval(30) {
                 credentialCache.clear()
                 return .unavailable(message: ProviderFailureMessage.tokenExpired(
                     provider: "Claude",
-                    command: "claude"
+                    command: signInCommand
                 ))
             }
         }
@@ -148,7 +216,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
             return .unavailable(message: ProviderFailureMessage.transport(
                 .unauthorized,
                 provider: "Claude",
-                command: "claude"
+                command: signInCommand
             ))
         }
 
@@ -174,14 +242,14 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
                 return .unavailable(message: ProviderFailureMessage.transport(
                     .invalidPayload,
                     provider: "Claude",
-                    command: "claude"
+                    command: signInCommand
                 ))
             }
 
             let snapshot = UsageSnapshot(
                 windows: windows,
                 updatedAt: Date(),
-                accountLabel: "Claude Code",
+                accountLabel: accountName.map { "Claude Code · \($0)" } ?? "Claude Code",
                 planLabel: nil,
                 sourceLabel: "Claude Code OAuth"
             )
@@ -198,22 +266,22 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
             return .unavailable(message: ProviderFailureMessage.transport(
                 error,
                 provider: "Claude",
-                command: "claude"
+                command: signInCommand
             ))
         } catch {
             return .unavailable(message: ProviderFailureMessage.transport(
                 .invalidPayload,
                 provider: "Claude",
-                command: "claude"
+                command: signInCommand
             ))
         }
     }
 
     private func loadOAuthCredentials() -> Result<ClaudeOAuthCredentials, CredentialReadIssue> {
-        let path = "~/.claude/.credentials.json"
+        let path = credentialsPath
         var readableFileWithoutOAuth = false
 
-        if let data = credentials.data(relativePath: ".claude/.credentials.json") {
+        if let data = credentials.data(relativePath: "\(configDirectory)/.credentials.json") {
             guard let envelope = try? JSONDecoder().decode(ClaudeCredentialEnvelope.self, from: data) else {
                 return .failure(.jsonUnreadable(path: path))
             }
@@ -284,7 +352,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
 
     private static let keychainInteractionLock = NSLock()
 
-    private static func readKeychainData(allowInteraction: Bool) throws -> Data? {
+    private static func readKeychainData(service: String, allowInteraction: Bool) throws -> Data? {
         // Login-Keychain ACL prompts are not controlled by LAContext. Serialize
         // all reads while temporarily changing its process-wide interaction flag.
         keychainInteractionLock.lock()
@@ -305,7 +373,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         context.interactionNotAllowed = !allowInteraction
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: "Claude Code-credentials",
+            kSecAttrService: service,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
             kSecUseAuthenticationContext: context
@@ -316,7 +384,7 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
             // Claude Code rewrites the item via /usr/bin/security on every token refresh,
             // which drops our "Always Allow" ACL entry. `security` created the item, so it
             // stays trusted and can read it without prompting.
-            if !allowInteraction, let data = readKeychainDataViaSecurityCLI() {
+            if !allowInteraction, let data = readKeychainDataViaSecurityCLI(service: service) {
                 return data
             }
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
@@ -324,10 +392,10 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         return result as? Data
     }
 
-    private static func readKeychainDataViaSecurityCLI() -> Data? {
+    private static func readKeychainDataViaSecurityCLI(service: String) -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -351,12 +419,12 @@ struct ClaudeUsageAdapter: UsageProviderAdapter {
         case let .success(value):
             oauth = value
         case let .failure(issue):
-            credentialCache.setFailureMessage(ProviderFailureMessage.credential(issue, command: "claude"))
+            credentialCache.setFailureMessage(ProviderFailureMessage.credential(issue, command: signInCommand))
             credentialCache.storeUnavailable()
             return false
         }
         guard isUsableForAuthorization(oauth) else {
-            credentialCache.setFailureMessage("Keychain access succeeded, but the Claude login has expired or is invalid. Run claude and sign in again, then choose Use Keychain.")
+            credentialCache.setFailureMessage("Keychain access succeeded, but the Claude login has expired or is invalid. Run \(signInCommand) and sign in again, then choose Use Keychain.")
             credentialCache.storeUnavailable()
             return false
         }

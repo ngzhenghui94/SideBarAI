@@ -20,7 +20,7 @@ enum ProviderFailureMessage {
         case .keychainAuthorizationRequired:
             "Claude Keychain authorization is required. Open SideBarAI Settings and choose Use Keychain."
         case .keychainUnavailable:
-            "Claude Code Keychain credential unavailable. Run `claude` to sign in, then choose Use Keychain in SideBarAI Settings."
+            "Claude Code Keychain credential unavailable. Run `\(command)` to sign in, then choose Use Keychain in SideBarAI Settings."
         }
     }
 

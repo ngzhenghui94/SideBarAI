@@ -278,6 +278,314 @@ struct StoreRegressionTests {
         #expect(!evaluator.alerts(for: [invalidRecord], now: resetDate).isEmpty)
     }
 
+    @Test
+    func codexMembershipAndMetadataRefreshOnTheSameStore() async {
+        let (defaults, name) = makeDefaults("CodexMembership")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let firstReading = snapshot(used: 25, resetDate: nil)
+        let secondReading = snapshot(used: 60, resetDate: nil)
+        let claude = ControlledRefreshAdapter(provider: .claude)
+        let discovery = MutableCodexDiscovery(adapters: [
+            codexFixture("one", label: "Work", state: .usage(firstReading)),
+            codexFixture("two", label: "Personal", state: .usage(secondReading))
+        ])
+        let store = UsageStore(
+            adapters: [claude], defaults: defaults, refreshInterval: .zero,
+            codexAdaptersFactory: { discovery.adapters }
+        )
+        defer { store.shutdown() }
+        await claude.complete(0, with: .usage(firstReading))
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["chatgpt:one", "chatgpt:two", "claude"])
+        #expect(store.records.first(where: { $0.recordID == "chatgpt:one" })?.accountLabel == "Work")
+        #expect(store.records(for: .chatgpt).allSatisfy { !$0.isActive })
+
+        // Identity survives reordering and renaming; OMP need not report an active login.
+        discovery.adapters = [
+            codexFixture("two", label: "Renamed", state: .usage(secondReading)),
+            codexFixture("three", label: "New", state: .usage(firstReading)),
+            codexFixture("one", label: "Work", state: .usage(firstReading))
+        ]
+        store.refresh()
+        await waitUntil { store.records.map(\.recordID) == ["chatgpt:two", "chatgpt:three", "chatgpt:one", "claude"] }
+        #expect(store.records[0].state == .usage(secondReading))
+        #expect(store.records[2].state == .usage(firstReading))
+        #expect(store.records[3].state == .usage(firstReading))
+        #expect(store.records.first(where: { $0.recordID == "chatgpt:two" })?.accountLabel == "Renamed")
+        await claude.complete(1, with: .usage(secondReading))
+        await waitForRefresh(store)
+        #expect(store.record(for: .claude)?.state == .usage(secondReading))
+
+        discovery.adapters = [codexFixture("three", label: "New", state: .usage(firstReading))]
+        store.refresh()
+        await claude.complete(2, with: .usage(firstReading))
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["chatgpt:three", "claude"])
+        #expect(await claude.callCount() == 3)
+        #expect(!store.isRefreshing)
+
+        discovery.adapters = []
+        store.refresh()
+        await claude.complete(3, with: .usage(firstReading))
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["chatgpt", "claude"])
+        #expect(store.record(for: .chatgpt)?.requiresSetup == true)
+        #expect(store.record(for: .chatgpt)?.state.errorMessage?.contains("OMP") == true)
+    }
+
+    @Test
+    func scheduledRefreshRediscoversCodexMembership() async {
+        let (defaults, name) = makeDefaults("ScheduledCodexMembership")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let discovery = MutableCodexDiscovery(adapters: [
+            codexFixture("one", label: "Original", state: .unavailable(message: "fixture"))
+        ])
+        let store = UsageStore(
+            adapters: [], defaults: defaults, refreshInterval: .milliseconds(20),
+            codexAdaptersFactory: { discovery.adapters }
+        )
+        defer { store.shutdown() }
+        await waitForRefresh(store)
+        discovery.adapters = [codexFixture("two", label: "Replacement", state: .unavailable(message: "fixture"))]
+        for _ in 0..<100 {
+            if store.records.map(\.recordID) == ["chatgpt:two"] { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(store.records.map(\.recordID) == ["chatgpt:two"])
+        #expect(store.record(for: .chatgpt)?.accountLabel == "Replacement")
+        #expect(store.record(for: .chatgpt)?.isActive == false)
+    }
+
+
+    @Test
+    func rediscoveryDiscardsDelayedResultsFromRemovedAndReplacedAdapters() async {
+        let (defaults, name) = makeDefaults("CodexMembershipCancellation")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let removed = ControlledRefreshAdapter(provider: .chatgpt, recordID: "removed")
+        let replaced = ControlledRefreshAdapter(provider: .chatgpt, recordID: "retained")
+        let discovery = MutableCodexDiscovery(adapters: [removed, replaced])
+        let store = UsageStore(
+            adapters: [], defaults: defaults, refreshInterval: .zero,
+            codexAdaptersFactory: { discovery.adapters }
+        )
+        defer { store.shutdown() }
+        for _ in 0..<100 {
+            if await removed.callCount() == 1, await replaced.callCount() == 1 { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await removed.callCount() == 1)
+        #expect(await replaced.callCount() == 1)
+        let reading = snapshot(used: 35, resetDate: nil)
+        discovery.adapters = [RegressionAdapter(provider: .chatgpt, customRecordID: "retained", state: .usage(reading))]
+        store.refresh()
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["retained"])
+        #expect(store.records.first?.state == .usage(reading))
+        let completed = store.lastRefreshCompleted
+        await removed.complete(0, with: .unavailable(message: "Removed account result"))
+        await replaced.complete(0, with: .unavailable(message: "Obsolete retained account result"))
+        await settle()
+        #expect(store.records.map(\.recordID) == ["retained"])
+        #expect(store.records.first?.state == .usage(reading))
+        #expect(store.lastRefreshCompleted == completed)
+        #expect(!store.isRefreshing)
+    }
+
+    @Test
+    func injectedAdaptersRemainFixedWithoutDiscoveryFactory() async {
+        let (defaults, name) = makeDefaults("FixedAdapters")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let store = UsageStore(
+            adapters: [RegressionAdapter(provider: .chatgpt, customRecordID: "injected", state: .unavailable(message: "fixture"))],
+            defaults: defaults, refreshInterval: .zero
+        )
+        defer { store.shutdown() }
+        await waitForRefresh(store)
+        store.refresh()
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["injected"])
+        #expect(store.records.first?.state == .unavailable(message: "fixture"))
+    }
+
+    @Test
+    func codexRediscoveryKeepsClaudeKeychainAuthorizationCache() async {
+        let (defaults, name) = makeDefaults("CodexClaudeAuthorization")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        // Disable Claude fetching so this test never contacts its usage endpoint.
+        defaults.set([Provider.claude.rawValue], forKey: "SideBarAI.disabledProviders")
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let claude = ClaudeUsageAdapter(
+            credentials: LocalCredentialReader(homeDirectoryURL: home), defaults: defaults,
+            keychainReader: { _ in Data(#"{"claudeAiOauth":{"accessToken":"fixture-only"}}"#.utf8) }
+        )
+        let discovery = MutableCodexDiscovery(adapters: [
+            RegressionAdapter(provider: .chatgpt, customRecordID: "one", state: .unavailable(message: "fixture"))
+        ])
+        let store = UsageStore(
+            adapters: [claude], defaults: defaults, refreshInterval: .zero,
+            codexAdaptersFactory: { discovery.adapters }
+        )
+        defer { store.shutdown() }
+        await waitForRefresh(store)
+        store.authorizeClaudeKeychain()
+        await waitForRefresh(store)
+        #expect(store.claudeKeychainAuthorizedForRun)
+        #expect(claude.keychainAccessAuthorizedForRun)
+        discovery.adapters = [
+            RegressionAdapter(provider: .chatgpt, customRecordID: "two", state: .unavailable(message: "fixture"))
+        ]
+        store.refresh()
+        await waitForRefresh(store)
+        #expect(store.claudeKeychainAuthorizedForRun)
+        #expect(store.records.map(\.recordID) == ["two", "claude"])
+        store.disableClaudeKeychainAccess()
+        #expect(!claude.keychainAccessAuthorizedForRun)
+        #expect(!store.claudeKeychainAuthorizedForRun)
+        await waitForRefresh(store)
+    }
+
+    @Test
+    func discoveryFailureRetainsAccountsAndRecoversWithoutBlockingOtherProviders() async {
+        let (defaults, name) = makeDefaults("DiscoveryFailure")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let discovery = ControlledCodexDiscovery()
+        let reading = snapshot(used: 35, resetDate: nil)
+        let store = UsageStore(
+            adapters: [RegressionAdapter(provider: .claude, customRecordID: "claude", state: .usage(reading))],
+            defaults: defaults, refreshInterval: .zero,
+            codexAdaptersFactory: { try await discovery.discover() }
+        )
+        defer { store.shutdown() }
+        await waitUntil { discovery.callCount == 1 && store.record(for: .claude)?.state == .usage(reading) }
+        #expect(store.record(for: .claude)?.state == .usage(reading))
+        #expect(store.isRefreshing)
+        discovery.complete(0, with: .success([codexFixture("one", label: "Known", state: .usage(reading))]))
+        await waitForRefresh(store)
+
+        store.refresh()
+        await waitUntil { discovery.callCount == 2 }
+        #expect(store.record(for: .chatgpt)?.state == .usage(reading))
+        discovery.complete(1, with: .failure(UsageCommandError.timedOut))
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["chatgpt:one", "claude"])
+        #expect(store.record(for: .chatgpt)?.accountLabel == "Known")
+        #expect(store.record(for: .chatgpt)?.state.errorMessage?.contains("timed out") == true)
+        #expect(store.record(for: .chatgpt)?.requiresSetup == false)
+        #expect(store.record(for: .claude)?.state == .usage(reading))
+
+        store.refresh()
+        await waitUntil { discovery.callCount == 3 }
+        discovery.complete(2, with: .success([codexFixture("one", label: "Renamed", state: .usage(reading))]))
+        await waitForRefresh(store)
+        #expect(store.record(for: .chatgpt)?.accountLabel == "Renamed")
+        #expect(store.record(for: .chatgpt)?.state == .usage(reading))
+    }
+
+    @Test
+    func discoveryFailureWithoutAccountsIsNotSuccessfulEmptySetup() async {
+        let (defaults, name) = makeDefaults("DiscoveryEmptyFailure")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let discovery = ControlledCodexDiscovery()
+        let store = UsageStore(adapters: [], defaults: defaults, refreshInterval: .zero,
+                               codexAdaptersFactory: { try await discovery.discover() })
+        defer { store.shutdown() }
+        await waitUntil { discovery.callCount == 1 }
+        discovery.complete(0, with: .failure(UsageCommandError.timedOut))
+        await waitForRefresh(store)
+        #expect(store.record(for: .chatgpt)?.requiresSetup == false)
+        #expect(store.record(for: .chatgpt)?.state.errorMessage?.contains("timed out") == true)
+        store.refresh()
+        await waitUntil { discovery.callCount == 2 }
+        discovery.complete(1, with: .success([]))
+        await waitForRefresh(store)
+        #expect(store.records.map(\.recordID) == ["chatgpt"])
+        #expect(store.record(for: .chatgpt)?.requiresSetup == true)
+    }
+
+    @Test
+    func staleDiscoverySuccessOrFailureCannotResurrectRemovedAccounts() async {
+        for staleFails in [false, true] {
+            let (defaults, name) = makeDefaults("StaleDiscovery")
+            defer { defaults.removePersistentDomain(forName: name) }
+            defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+            let discovery = ControlledCodexDiscovery()
+            let store = UsageStore(adapters: [], defaults: defaults, refreshInterval: .zero,
+                                   codexAdaptersFactory: { try await discovery.discover() })
+            defer { store.shutdown() }
+            await waitUntil { discovery.callCount == 1 }
+            store.refresh()
+            await waitUntil { discovery.callCount == 2 }
+            discovery.complete(1, with: .success([]))
+            await waitForRefresh(store)
+            let records = store.records
+            let completed = store.lastRefreshCompleted
+            if staleFails {
+                discovery.complete(0, with: .failure(UsageCommandError.timedOut))
+            } else {
+                discovery.complete(0, with: .success([
+                    codexFixture("removed", label: "Obsolete", state: .unavailable(message: "obsolete"))
+                ]))
+            }
+            await settle()
+            #expect(store.records == records)
+            #expect(store.lastRefreshCompleted == completed)
+            #expect(!store.isRefreshing)
+        }
+    }
+
+    @Test
+    func canceledGenerationDoesNotStartDiscovery() async {
+        let (defaults, name) = makeDefaults("DiscoveryBeforeAwait")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let discovery = ControlledCodexDiscovery()
+        let store = UsageStore(adapters: [], defaults: defaults, refreshInterval: .zero,
+                               codexAdaptersFactory: { try await discovery.discover() })
+        defer { store.shutdown() }
+        // All calls occur on MainActor without yielding; only the final task may discover.
+        store.refresh()
+        store.refresh()
+        await waitUntil { discovery.callCount == 1 }
+        discovery.complete(0, with: .success([]))
+        await waitForRefresh(store)
+        #expect(discovery.callCount == 1)
+    }
+
+    @Test
+    func shutdownDiscardsPendingDiscoveryMembership() async {
+        let (defaults, name) = makeDefaults("DiscoveryShutdown")
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(false, forKey: "SideBarAI.quotaAlertsEnabled")
+        let discovery = ControlledCodexDiscovery()
+        let store = UsageStore(adapters: [], defaults: defaults, refreshInterval: .zero,
+                               codexAdaptersFactory: { try await discovery.discover() })
+        await waitUntil { discovery.callCount == 1 }
+        store.shutdown()
+        let records = store.records
+        discovery.complete(0, with: .success([
+            codexFixture("late", label: "Late", state: .unavailable(message: "obsolete"))
+        ]))
+        await settle()
+        #expect(store.records == records)
+        #expect(store.lastRefreshCompleted == nil)
+        #expect(!store.isRefreshing)
+    }
+
+
+    private func codexFixture(_ key: String, label: String, state: ProviderState) -> DiscoveredCodexFixtureAdapter {
+        DiscoveredCodexFixtureAdapter(
+            account: CodexAccount(accountKey: key, accountLabel: label), state: state
+        )
+    }
+
+
     private func snapshot(used: Double, resetDate: Date?) -> UsageSnapshot {
         UsageSnapshot(
             windows: [
@@ -328,13 +636,38 @@ struct StoreRegressionTests {
     }
 }
 
+@MainActor
+private final class MutableCodexDiscovery {
+    var adapters: [any UsageProviderAdapter]
+
+    init(adapters: [any UsageProviderAdapter]) { self.adapters = adapters }
+}
+
+private struct DiscoveredCodexFixtureAdapter: UsageProviderAdapter {
+    let account: CodexAccount
+    let state: ProviderState
+
+    var provider: Provider { .chatgpt }
+    var recordID: String { account.recordID }
+    var accountLabel: String? { account.accountLabel }
+    var isActive: Bool { account.isActive }
+    var hasUsableCredentials: Bool { true }
+    var planLabel: String? { account.planLabel }
+
+    func fetch() async -> ProviderState { state }
+}
+
 private actor ControlledRefreshAdapter: UsageProviderAdapter {
     nonisolated let provider: Provider
+    nonisolated let recordID: String
     private var nextCall = 0
     private var pending: [Int: CheckedContinuation<ProviderState, Never>] = [:]
     private var completed: [Int: ProviderState] = [:]
 
-    init(provider: Provider) { self.provider = provider }
+    init(provider: Provider, recordID: String? = nil) {
+        self.provider = provider
+        self.recordID = recordID ?? provider.rawValue
+    }
 
     func callCount() -> Int { nextCall }
 
@@ -460,3 +793,21 @@ private final class BlockingAlertDelivery: QuotaAlertDelivering, AlertDeliveryPr
         continuation = nil
     }
 }
+
+
+@MainActor
+private final class ControlledCodexDiscovery {
+    private var continuations: [Int: CheckedContinuation<[any UsageProviderAdapter], any Error>] = [:]
+    private(set) var callCount = 0
+
+    func discover() async throws -> [any UsageProviderAdapter] {
+        let index = callCount
+        callCount += 1
+        return try await withCheckedThrowingContinuation { continuations[index] = $0 }
+    }
+
+    func complete(_ index: Int, with result: Result<[any UsageProviderAdapter], any Error>) {
+        continuations.removeValue(forKey: index)?.resume(with: result)
+    }
+}
+

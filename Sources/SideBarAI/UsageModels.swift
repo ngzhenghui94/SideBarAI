@@ -56,7 +56,7 @@ enum Provider: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
         case .claude:
             "Claude Code OAuth"
         case .chatgpt:
-            "Codex CLI OAuth"
+            "OMP saved logins"
         case .antigravity:
             "Antigravity CLI (agy)"
         }
@@ -597,7 +597,7 @@ private enum CodexUsageAggregation {
                 updatedAt: updatedAt,
                 accountLabel: "All Codex accounts · \(records.count)",
                 planLabel: consolidatedPlanLabel(records: records),
-                sourceLabel: "Codex CLI OAuth · \(records.count) accounts consolidated",
+                sourceLabel: "OMP usage · \(records.count) accounts consolidated",
                 savedResetCount: summedResetCount(resetCounts, expectedCount: records.count),
                 modelUsage: aggregateModelUsage(from: entries),
                 // Each account reports the same provider-wide unassigned history.

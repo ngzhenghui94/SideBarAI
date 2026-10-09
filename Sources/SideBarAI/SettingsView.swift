@@ -213,6 +213,33 @@ struct SettingsView: View {
 
             Divider()
 
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Slim Rail")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    Text("Use a narrower collapsed rail with smaller provider tiles.")
+                        .font(.system(size: 10, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 10)
+
+                Toggle(
+                    "Slim rail",
+                    isOn: Binding(
+                        get: { store.slimRailEnabled },
+                        set: { store.setSlimRailEnabled($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .accessibilityLabel("Slim rail")
+                .help("Use a narrower collapsed rail")
+            }
+
+            Divider()
+
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Startup sidebar")
@@ -602,9 +629,9 @@ struct SettingsView: View {
     private func credentialLocation(for provider: Provider) -> String {
         switch provider {
         case .claude:
-            "~/.claude/.credentials.json or macOS Keychain"
+            "~/.claude and ~/.claude-* (CLAUDE_CONFIG_DIR) credentials or macOS Keychain"
         case .chatgpt:
-            "~/.codex/accounts/registry.json and account credential files"
+            "OMP saved logins · usage and account discovery through omp usage --json"
         case .antigravity:
             "Antigravity CLI (agy) manages credentials in macOS Keychain"
         }

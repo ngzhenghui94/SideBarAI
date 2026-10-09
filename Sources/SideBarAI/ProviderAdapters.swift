@@ -1,25 +1,28 @@
 import Foundation
 
 enum DefaultUsageAdapters {
-    static func make(
-        credentials: LocalCredentialReader = LocalCredentialReader()
-    ) -> [any UsageProviderAdapter] {
-        let client = UsageHTTPClient()
-        let ompUsageSource = OMPUsageSource()
-        let codexAdapters: [any UsageProviderAdapter] = CodexAccount
-            .discover(credentials: credentials)
-            .map { account in
-                CodexUsageAdapter(
-                    account: account,
-                    http: client,
-                    credentials: credentials,
-                    ompUsageSource: ompUsageSource
-                )
-            }
+    static func makeCodex(
+        ompUsageSource: OMPUsageSource
+    ) async throws -> [any UsageProviderAdapter] {
+        try await ompUsageSource.codexAccounts().map {
+            CodexUsageAdapter(account: $0, ompUsageSource: ompUsageSource)
+        }
+    }
 
-        return codexAdapters + [
-            ClaudeUsageAdapter(http: client, credentials: credentials, ompUsageSource: ompUsageSource),
-            AntigravityUsageAdapter()
-        ]
+    static func makeNonCodex(
+        credentials: LocalCredentialReader = LocalCredentialReader(),
+        http: UsageHTTPClient,
+        ompUsageSource: OMPUsageSource
+    ) -> [any UsageProviderAdapter] {
+        let claude = ClaudeUsageAdapter.discoverConfigDirectories(homeDirectoryURL: credentials.homeDirectoryURL).map {
+            ClaudeUsageAdapter(
+                http: http,
+                credentials: credentials,
+                configDirectory: $0,
+                // OMP's Anthropic model usage is not per login; attach it once to avoid double counting.
+                ompUsageSource: $0 == ClaudeUsageAdapter.defaultConfigDirectory ? ompUsageSource : nil
+            )
+        }
+        return claude + [AntigravityUsageAdapter()]
     }
 }

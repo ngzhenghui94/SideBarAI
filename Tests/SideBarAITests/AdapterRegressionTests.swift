@@ -31,6 +31,43 @@ struct AdapterRegressionTests {
     }
 
     @Test
+    func claudeDiscoversAndReadsConfigDirAccounts() async throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try write(
+            #"{"claudeAiOauth":{"accessToken":"personal-token"}}"#,
+            to: home.appendingPathComponent(".claude-personal/.credentials.json")
+        )
+        try FileManager.default.createDirectory(
+            at: home.appendingPathComponent(".claude-signed-out"),
+            withIntermediateDirectories: true
+        )
+
+        #expect(ClaudeUsageAdapter.discoverConfigDirectories(homeDirectoryURL: home) == [".claude", ".claude-personal"])
+        // Matches Claude Code's naming: sha256 of the absolute config dir, first 8 hex chars.
+        #expect(ClaudeUsageAdapter.keychainService(
+            configDirectory: ".claude-personal",
+            homeDirectoryURL: URL(fileURLWithPath: "/Users/icelemontees")
+        ) == "Claude Code-credentials-b0ff8ea6")
+
+        let session = fixtureSession([
+            "/api/oauth/usage": #"{"five_hour":{"utilization":12,"resets_at":"2030-01-07T00:00:00Z"}}"#
+        ])
+        let adapter = ClaudeUsageAdapter(
+            http: UsageHTTPClient(session: session),
+            credentials: LocalCredentialReader(homeDirectoryURL: home),
+            configDirectory: ".claude-personal"
+        )
+        #expect(adapter.recordID == "claude:personal")
+        #expect(adapter.accountLabel == "personal")
+        guard case let .usage(snapshot) = await adapter.fetch() else {
+            Issue.record("Expected usage from ~/.claude-personal credentials")
+            return
+        }
+        #expect(snapshot.accountLabel == "Claude Code · personal")
+    }
+
+    @Test
     func antigravityParsesGroupedRemainingQuotaAndDropsUnknownBuckets() async throws {
         let payload = #"{"status":"SUCCESS","num_turns":0,"command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.8,"reset_time":"2030-01-02T00:00:00Z"},{"id":"gemini-5h","window":"5h","remaining_fraction":1},{"id":"unknown","window":"5h"},{"id":"disabled","window":"5h","remaining_fraction":0,"disabled":true},{"id":"invalid","window":"5h","remaining_fraction":true}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-5h","window":"5h","remaining_fraction":0.25}]}]}}}"#
         let adapter = AntigravityUsageAdapter(

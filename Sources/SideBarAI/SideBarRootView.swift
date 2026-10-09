@@ -110,6 +110,10 @@ private struct CompactRailView: View {
         store.compactRecords
     }
 
+    private var isSlim: Bool {
+        store.slimRailEnabled
+    }
+
     private var expandIconName: String {
         switch attachment {
         case .left:
@@ -129,20 +133,21 @@ private struct CompactRailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SidebarDragHandle(attachment: attachment)
+            SidebarDragHandle(attachment: attachment, isSlim: isSlim)
                 .padding(.top, 2)
             ScrollView(.vertical) {
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: isSlim ? 6 : 8) {
                     ForEach(compactRecords) { record in
                         CompactProviderIndicator(
                             record: record,
+                            isSlim: isSlim,
                             onHoverChange: { hovering in
                                 onPeekChange(record.id, hovering)
                             }
                         )
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, isSlim ? 6 : 8)
                 .padding(.bottom, 4)
             }
             .scrollIndicators(.hidden)
@@ -153,9 +158,9 @@ private struct CompactRailView: View {
                 onExpandedChange(true)
             } label: {
                 Image(systemName: expandIconName)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: isSlim ? 10 : 12, weight: .bold))
                     .foregroundStyle(SideBarTheme.primaryText)
-                    .frame(width: 32, height: 30)
+                    .frame(width: isSlim ? 26 : 32, height: isSlim ? 24 : 30)
                     .background(
                         usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.elevated,
                         in: expandButtonShape
@@ -166,8 +171,8 @@ private struct CompactRailView: View {
             .accessibilityLabel("Expand SideBarAI")
             .accessibilityHint("Shows the full AI usage dashboard")
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 10)
+        .padding(.horizontal, isSlim ? 4 : 6)
+        .padding(.vertical, isSlim ? 8 : 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             ZStack {
@@ -263,13 +268,14 @@ private struct SidebarNativeDragHandle: NSViewRepresentable {
 @MainActor
 private struct SidebarDragHandle: View {
     let attachment: SidebarEdge
+    var isSlim = false
     @Environment(\.sideBarLiquidGlassEnabled) private var usesLiquidGlass
 
     var body: some View {
         Image(systemName: "line.3.horizontal")
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: isSlim ? 9 : 11, weight: .semibold))
             .foregroundStyle(SideBarTheme.mutedText)
-            .frame(width: 28, height: 20)
+            .frame(width: isSlim ? 22 : 28, height: isSlim ? 16 : 20)
             .background(
                 usesLiquidGlass ? SideBarTheme.glassSurface : SideBarTheme.elevated,
                 in: Capsule()
@@ -286,6 +292,7 @@ private struct SidebarDragHandle: View {
 @MainActor
 private struct CompactProviderIndicator: View {
     let record: ProviderRecord
+    let isSlim: Bool
     let onHoverChange: (Bool) -> Void
 
     private var usageSnapshot: UsageSnapshot? {
@@ -337,13 +344,17 @@ private struct CompactProviderIndicator: View {
     }
 
     private var tileShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: isSlim ? 9 : 12, style: .continuous)
+    }
+
+    private var tileSize: CGFloat {
+        isSlim ? 30 : 40
     }
 
     /// A provider tile that fills from the bottom with the primary window's usage,
     /// with a thin 7-day meter along its base.
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: isSlim ? 3 : 4) {
             ZStack(alignment: .bottom) {
                 tileShape.fill(SideBarTheme.usageTrackSubtle)
 
@@ -371,7 +382,7 @@ private struct CompactProviderIndicator: View {
                     } else {
                         ProviderIcon(
                             provider: record.provider,
-                            size: 17,
+                            size: isSlim ? 13 : 17,
                             tint: progress == nil ? record.provider.accentColor : SideBarTheme.primaryText
                         )
                     }
@@ -385,13 +396,13 @@ private struct CompactProviderIndicator: View {
                             percentUsed: sevenDayWindow?.percentUsed,
                             normal: SideBarTheme.usageSevenDay
                         ),
-                        height: 3
+                        height: isSlim ? 2 : 3
                     )
-                    .padding(.horizontal, 7)
-                    .padding(.bottom, 5)
+                    .padding(.horizontal, isSlim ? 5 : 7)
+                    .padding(.bottom, isSlim ? 4 : 5)
                 }
             }
-            .frame(width: 40, height: 40)
+            .frame(width: tileSize, height: tileSize)
             .clipShape(tileShape)
             .overlay {
                 tileShape.stroke(
@@ -403,7 +414,7 @@ private struct CompactProviderIndicator: View {
                 if record.isActive {
                     Circle()
                         .fill(SideBarTheme.success)
-                        .frame(width: 7, height: 7)
+                        .frame(width: isSlim ? 6 : 7, height: isSlim ? 6 : 7)
                         .overlay {
                             Circle().stroke(SideBarTheme.canvas, lineWidth: 1.5)
                         }
@@ -412,7 +423,7 @@ private struct CompactProviderIndicator: View {
             }
 
             Text(valueLabel)
-                .font(SideBarTheme.caption.weight(.semibold))
+                .font(isSlim ? .system(size: 9, weight: .semibold, design: .rounded) : SideBarTheme.caption.weight(.semibold))
                 .foregroundStyle(SideBarTheme.primaryText)
                 .monospacedDigit()
         }
