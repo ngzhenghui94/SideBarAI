@@ -24,6 +24,7 @@ REMOTE = f"https://github.com/{TAP}.git"
 CHECKOUT = ROOT / "dist/update-tap"
 RELEASES = ROOT / "dist/releases"
 SPARKLE = ROOT / ".build/artifacts/sparkle/Sparkle/bin"
+SIGNING = ROOT / "scripts/signing.swift"
 TEAM = "F57QJC4XU3"
 REQUIREMENT = (f'=identifier "{IDENTIFIER}" and anchor apple generic and '
                'certificate 1[field.1.2.840.113635.100.6.2.6] exists and '
@@ -37,6 +38,8 @@ NS = {"sparkle": "http://www.andymatuschak.org/xml-namespaces/sparkle"}
 def run(label, *command):
     result = subprocess.run(command, capture_output=True, text=True, cwd=ROOT)
     if result.returncode:
+        if command[:2] == ("/usr/bin/swift", str(SIGNING)):
+            raise RuntimeError(f"{label} failed: {result.stderr.strip()}")
         raise RuntimeError(f"{label} failed (exit {result.returncode}); private command output withheld")
     return result.stdout.strip()
 
@@ -96,6 +99,17 @@ def selftest():
             pass
         else:
             raise AssertionError("Unsafe or exhausted build accepted")
+    from unittest.mock import patch
+    failure = subprocess.CompletedProcess((), 1, stderr="OSStatus=-25293")
+    with patch("subprocess.run", return_value=failure):
+        for command, expected in ((("/usr/bin/swift", str(SIGNING)), "OSStatus=-25293"),
+                                  (("/usr/bin/codesign",), "private command output withheld")):
+            try:
+                run("Fixture", *command)
+            except RuntimeError as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError("Signing failure was ignored")
     print("release selftest ok: numeric ordering, safe paths, monotonic builds")
 
 
@@ -114,8 +128,9 @@ def main(source, final):
     git("fetch", "origin", "main")
     git("merge", "--ff-only", "origin/main")
     staged = info(source)
-    public_key = run("Read public update key", str(SPARKLE / "generate_keys"), "--account", IDENTIFIER, "-p")
-    if (public_key != staged.get("SUPublicEDKey") or staged.get("SURequireSignedFeed") is not True
+    public_key = staged["SUPublicEDKey"]
+    run("Noninteractive update signing key", "/usr/bin/swift", str(SIGNING), "check", IDENTIFIER, public_key)
+    if (staged.get("SURequireSignedFeed") is not True
             or staged.get("SUVerifyUpdateBeforeExtraction") is not True):
         raise RuntimeError("Pinned update public key or signed-feed requirement differs")
     versions = [staged["CFBundleShortVersionString"]]
@@ -128,7 +143,7 @@ def main(source, final):
         builds.append(previous["CFBundleVersion"])
     feed = CHECKOUT / f"appcasts/{SLUG}.xml"
     if feed.exists():
-        run("Existing feed signature", str(SPARKLE / "sign_update"), "--account", IDENTIFIER, "--verify", str(feed))
+        run("Existing feed signature", "/usr/bin/swift", str(SIGNING), "verify", public_key, str(feed))
         tree = ET.parse(feed)
         versions.extend(e.text for e in tree.findall(".//sparkle:shortVersionString", NS))
         builds.extend(e.text for e in tree.findall(".//sparkle:version", NS))
@@ -181,10 +196,10 @@ def main(source, final):
     run("Final signature verification", "codesign", "--verify", "--deep", "--strict", "-R", REQUIREMENT, str(app))
     archive = output / f"{ARCHIVE_PREFIX}-{version}.zip"
     run("Archive notarized app", "ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(archive))
-    signature = run("Sign update archive", str(SPARKLE / "sign_update"), "--account", IDENTIFIER, "-p", str(archive))
+    signature = run("Sign update archive", "/usr/bin/swift", str(SIGNING), "sign", str(SPARKLE / "sign_update"), IDENTIFIER, public_key, str(archive))
     if not re.fullmatch(r"[A-Za-z0-9+/]{86}==", signature):
         raise RuntimeError("Invalid archive signature")
-    run("Verify archive signature", str(SPARKLE / "sign_update"), "--account", IDENTIFIER, "--verify", str(archive), signature)
+    run("Verify archive signature", "/usr/bin/swift", str(SIGNING), "verify", public_key, str(archive), signature)
     tag = TAG_PREFIX + version
     url = f"https://github.com/{REPO}/releases/download/{tag}/{archive.name}"
     appcast = output / "appcast.xml"
@@ -196,8 +211,8 @@ def main(source, final):
 <enclosure url="{url}" length="{archive.stat().st_size}" type="application/octet-stream" sparkle:edSignature="{signature}" /></item>
 </channel></rss>
 ''')
-    run("Sign appcast", str(SPARKLE / "sign_update"), "--account", IDENTIFIER, str(appcast))
-    run("Verify appcast signature", str(SPARKLE / "sign_update"), "--account", IDENTIFIER, "--verify", str(appcast))
+    run("Sign appcast", "/usr/bin/swift", str(SIGNING), "sign", str(SPARKLE / "sign_update"), IDENTIFIER, public_key, str(appcast))
+    run("Verify appcast signature", "/usr/bin/swift", str(SIGNING), "verify", public_key, str(appcast))
     expected = {p.name: digest(p) for p in (archive, appcast)}
     run("Create draft release", "gh", "release", "create", tag, "--repo", REPO, "--target", "main", "--draft",
         "--title", f"{NAME} {version}", "--notes", "Developer ID signed, Apple-notarized, stapled Apple Silicon app with signed Sparkle updates. Authored sources are not included in these release assets.", str(archive), str(appcast))
