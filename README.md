@@ -77,7 +77,7 @@ open "$HOME/Applications/SideBarAI.app"
 Run tests and a release build from the repository root:
 
 ```sh
-swift test
+DYLD_FRAMEWORK_PATH="$PWD/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64" swift test
 swift build -c release
 ```
 
@@ -89,17 +89,15 @@ To create an app bundle without installing it:
 bash scripts/package-app.sh release
 ```
 
-The packaging script accepts `bash scripts/package-app.sh [debug|release] [destination]`. It places the SwiftPM asset bundle under `Contents/Resources`, signs the complete app, and verifies its signature with `codesign --verify --strict`. Installation verifies the copied app as well. Signing only the executable before embedding it in an app can leave an invalid bundle signature and interfere with Keychain authorization.
+Release packaging is the normal build: it builds SwiftPM, verifies the manual-only updater policy, assigns the next numeric version/build, Developer ID signs nested code and the app with team `F57QJC4XU3` while preserving entitlements and bundle ID `com.icelemontees.SideBarAI`, submits using the existing Keychain profile `notary`, staples and validates the ticket, assesses Gatekeeper, and publishes a new release to the existing `ngzhenghui94/SideBarAI` destination. It verifies uploaded and public download checksums before pushing the signed feed and cask to `ngzhenghui94/homebrew-tap` main from the project-private `dist/update-tap` clone, fetching/rebasing its own commit before a normal push. Existing releases are never overwritten. `--dry-run` on build-install suppresses installation only; release publication still occurs.
 
-Builds are ad-hoc signed unless `CODESIGN_IDENTITY` names a signing identity; a real identity also enables the hardened runtime and a secure timestamp. To produce a notarized release, store notary credentials once, then package with both variables:
+The ready app is `dist/SideBarAI.app`; immutable app/ZIP/signed appcast/notarization records are retained under `dist/releases/<version>/`. Never delete a failed release directory or draft blindly: inspect its recorded Apple submission and GitHub draft before retrying. Build locks prevent concurrent runs. The publisher requires existing Developer ID and app-specific Sparkle signing keys in Keychain, `gh` publication access, and the notary profile. It does not export secrets or grant permissions. Authored source is not included in the app ZIP or public tap. `debug` packaging is explicitly local/ad-hoc and does not publish.
 
-```sh
-xcrun notarytool store-credentials notary --apple-id <apple-id> --team-id F57QJC4XU3
-CODESIGN_IDENTITY="Developer ID Application: Zheng Hui Ng (F57QJC4XU3)" \
-NOTARY_PROFILE=notary bash scripts/package-app.sh release
-```
+### In-app updates
 
-The script submits the app, waits for Apple's verdict (printing the log on rejection), staples the ticket, checks Gatekeeper, and writes `dist/SideBarAI-<version>.zip`.
+Choose **Check for Updates…** from the menu bar. Sparkle 2.10.0 requires both a signed appcast and Ed25519-signed archives, validates the signed app identity, and asks before installing/relaunching. Update checks, automatic downloads/installation, permission prompts, and system profiling are disabled, including persisted Sparkle preferences. The HTTPS feed is `https://raw.githubusercontent.com/ngzhenghui94/homebrew-tap/main/appcasts/sidebarai.xml`. Update signatures use the existing app-specific Keychain account `com.icelemontees.SideBarAI`; only its public verification key is in the bundle. Old versions without Sparkle need this notarized version installed once. Settings/usage login state remain owned by their existing stores; normal termination saves sidebar state and shuts down usage work.
+
+Run the small release policy checks with `python3 scripts/release.py --selftest` and the packaged executable with `--update-selftest`; these checks do not install an update. GUI install/relaunch and provider behavior are checked separately.
 
 ## Privacy and credentials
 
