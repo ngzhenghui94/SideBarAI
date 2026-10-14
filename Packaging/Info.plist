@@ -35,6 +35,7 @@
 	<key>SUPublicEDKey</key>
 	<string>zSznfRp6EclFMx2Wn4kWcNAODd+YSjrEt4WXrFXU6j4=</string>
 	<key>SURequireSignedFeed</key><true/>
+	<key>SUVerifyUpdateBeforeExtraction</key><true/>
 	<key>SUEnableAutomaticChecks</key><false/>
 	<key>SUAutomaticallyUpdate</key><false/>
 	<key>SUAllowsAutomaticUpdates</key><false/>

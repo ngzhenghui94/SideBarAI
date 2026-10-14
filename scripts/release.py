@@ -115,7 +115,8 @@ def main(source, final):
     git("merge", "--ff-only", "origin/main")
     staged = info(source)
     public_key = run("Read public update key", str(SPARKLE / "generate_keys"), "--account", IDENTIFIER, "-p")
-    if public_key != staged.get("SUPublicEDKey") or staged.get("SURequireSignedFeed") is not True:
+    if (public_key != staged.get("SUPublicEDKey") or staged.get("SURequireSignedFeed") is not True
+            or staged.get("SUVerifyUpdateBeforeExtraction") is not True):
         raise RuntimeError("Pinned update public key or signed-feed requirement differs")
     versions = [staged["CFBundleShortVersionString"]]
     builds = [staged["CFBundleVersion"]]
