@@ -39,6 +39,11 @@ final class AppUpdates: NSObject, SPUUpdaterDelegate, NSMenuItemValidation {
     }
 
     static func selftest() throws {
+        precondition((Bundle.main.object(forInfoDictionaryKey: "SURequireSignedFeed") as? Bool) == true)
+        precondition((Bundle.main.object(forInfoDictionaryKey: "SUVerifyUpdateBeforeExtraction") as? Bool) == true)
+        precondition((Bundle.main.object(forInfoDictionaryKey: "SUAllowsAutomaticUpdates") as? Bool) == false)
+        let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? ""
+        precondition(URL(string: feed)?.scheme == "https")
         try requireManualCheck(.updates)
         for check: SPUUpdateCheck in [.updatesInBackground, .updateInformation] {
             do { try requireManualCheck(check); preconditionFailure("Unsolicited update check accepted") }
