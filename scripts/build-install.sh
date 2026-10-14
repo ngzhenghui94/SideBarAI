@@ -57,11 +57,9 @@ APP_BUNDLE="$PACKAGE_DESTINATION/$APP_NAME"
 INSTALL_TARGET="$INSTALL_DIR/$APP_NAME"
 
 cd "$ROOT_DIR"
-printf 'Building %s configuration...\n' "$CONFIG"
-rtk swift build -c "$CONFIG"
 
 printf 'Packaging %s...\n' "$APP_NAME"
-rtk bash "$ROOT_DIR/scripts/package-app.sh" "$CONFIG" "$PACKAGE_DESTINATION"
+rtk proxy bash "$ROOT_DIR/scripts/package-app.sh" "$CONFIG" "$PACKAGE_DESTINATION"
 
 if [[ "$DRY_RUN" == true ]]; then
     printf 'Dry run: would install %s to %s\n' "$APP_BUNDLE" "$INSTALL_TARGET"

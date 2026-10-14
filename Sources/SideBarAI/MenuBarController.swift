@@ -95,6 +95,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(refreshItem)
         menu.addItem(settingsItem)
+        menu.addItem(AppUpdates.shared.menuItem())
         menu.addItem(.separator())
         menu.addItem(quitItem)
         statusItem.menu = menu

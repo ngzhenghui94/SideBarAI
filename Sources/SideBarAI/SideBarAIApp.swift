@@ -5,6 +5,10 @@ import Foundation
 @MainActor
 enum SideBarAIApp {
     static func main() {
+        if CommandLine.arguments.contains("--update-selftest") {
+            try! AppUpdates.selftest()
+            return
+        }
         let application = NSApplication.shared
         let delegate = SideBarAIAppDelegate()
         application.delegate = delegate
@@ -45,6 +49,7 @@ final class SideBarAIAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppUpdates.shared.start()
         NSApplication.shared.setActivationPolicy(.accessory)
         let startupState = store.startupSidebarState
         panelController.setExpanded(startupState.isExpanded)
