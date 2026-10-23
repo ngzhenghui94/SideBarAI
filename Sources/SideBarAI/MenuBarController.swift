@@ -229,28 +229,42 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         var insertionIndex = menu.index(of: lastCheckedItem)
         for record in menuRecords {
-            let item = NSMenuItem(title: accountMenuTitle(for: record), action: nil, keyEquivalent: "")
-            item.attributedTitle = accountAttributedTitle(for: record)
+            let summary = usageSummary(for: record)
+            let title = accountAttributedTitle(for: record, summary: summary)
+            let item = NSMenuItem(title: title.string, action: nil, keyEquivalent: "")
+            item.attributedTitle = title
             item.image = Self.providerImage(for: record.provider)
-            item.isEnabled = false
-            if case let .usage(snapshot) = record.state, snapshot.hasModelUsage {
-                item.toolTip = snapshot.modelUsageDetail
-            } else {
-                item.toolTip = record.state.errorMessage
+
+            var details = accountIdentity(for: record) + [summary]
+            if let snapshot = record.state.snapshot {
+                details += [snapshot.savedResetLabel, snapshot.subscriptionRenewalLabel()]
+                    .compactMap { $0 }
+                details += snapshot.modelUsageDetail?.components(separatedBy: " · ") ?? []
             }
+            if let error = record.state.errorMessage {
+                details.append(error)
+            }
+            let submenu = NSMenu()
+            submenu.autoenablesItems = false
+            for detail in details {
+                let detailItem = NSMenuItem(title: detail, action: nil, keyEquivalent: "")
+                detailItem.isEnabled = false
+                submenu.addItem(detailItem)
+            }
+            item.submenu = submenu
+            item.toolTip = details.joined(separator: "\n")
             menu.insertItem(item, at: insertionIndex)
             accountItems.append(item)
             insertionIndex += 1
         }
     }
 
-    private func accountMenuTitle(for record: ProviderRecord) -> String {
-        "\(accountIdentity(for: record).joined(separator: " · "))  \(usageDetailLines(for: record).joined(separator: " · "))"
-    }
-
-    /// Two-tone row: provider name and account on the first line, usage beneath.
-    private func accountAttributedTitle(for record: ProviderRecord) -> NSAttributedString {
-        let identity = accountIdentity(for: record)
+    /// Keep the overview to two lines; the submenu retains the full identity and usage.
+    private func accountAttributedTitle(for record: ProviderRecord, summary: String) -> NSAttributedString {
+        var identity = [record.provider.shortName]
+        if let label = record.displayAccountLabel {
+            identity.append(label.count > 36 ? String(label.prefix(36)) + "…" : label)
+        }
         let title = NSMutableAttributedString(
             string: identity[0],
             attributes: [
@@ -267,15 +281,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 ]
             ))
         }
-        for line in usageDetailLines(for: record) {
-            title.append(NSAttributedString(
-                string: "\n" + line,
-                attributes: [
-                    .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                    .foregroundColor: NSColor.secondaryLabelColor
-                ]
-            ))
-        }
+        title.append(NSAttributedString(
+            string: "\n" + summary,
+            attributes: [
+                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+        ))
         return title
     }
 
@@ -334,20 +346,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return "Last checked: \(formatter.localizedString(for: date, relativeTo: Date()))"
     }
 
-    /// Usage summary split into short lines: quota window, plan dates, model costs.
-    private func usageDetailLines(for record: ProviderRecord) -> [String] {
-        guard store.isProviderEnabled(record.provider) else { return ["Disabled"] }
+    private func usageSummary(for record: ProviderRecord) -> String {
+        guard store.isProviderEnabled(record.provider) else { return "Disabled" }
         switch record.state {
         case .loading:
-            return ["Checking…"]
+            return "Checking…"
         case .authenticated:
-            return ["Connected"]
+            return "Connected"
         case .unavailable:
-            return ["Needs setup"]
+            return "Needs setup"
         case let .usage(snapshot):
-            let modelUsageDetail = snapshot.hasModelUsage ? snapshot.modelUsageDetail : nil
             guard let window = snapshot.windows.first else {
-                return [modelUsageDetail ?? "No usage data"]
+                return snapshot.hasModelUsage ? "Local usage available · quota unavailable" : "No usage data"
             }
 
             var quota = "\(window.label): \(usageValue(for: window))"
@@ -356,10 +366,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 formatter.unitsStyle = .abbreviated
                 quota += " · resets \(formatter.localizedString(for: resetDate, relativeTo: Date()))"
             }
-            let planDates = [snapshot.savedResetLabel, snapshot.subscriptionRenewalLabel()]
-                .compactMap { $0 }
-                .joined(separator: " · ")
-            return [quota, planDates, modelUsageDetail ?? ""].filter { !$0.isEmpty }
+            return quota
         }
     }
 

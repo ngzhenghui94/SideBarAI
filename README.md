@@ -8,6 +8,7 @@ SideBarAI is a native macOS menu-bar utility with an edge-attached, expandable s
 - Local OMP model token totals (including cached input) for the last 30 days, with Codex and Claude cost estimates calculated from published OpenAI and Anthropic rates—not saved dollar amounts or subscription bills.
 - Manual refresh or scheduled refresh every 1, 5, 15, or 30 minutes, or hourly.
 - Menu-bar controls for showing or hiding the sidebar, compact or expanded views, and attachment to the left, right, top, or bottom screen edge.
+- Compact two-line account summaries in the menu bar; open an account's submenu for its full identity, plan, saved resets, local token totals, and pricing notes.
 - Provider enable/disable and visibility controls.
 - Optional consolidation of multiple discovered Codex accounts into one weighted quota.
 - Codex accounts discovered from your existing OMP logins on each refresh; no separate login manager or credential copies.
