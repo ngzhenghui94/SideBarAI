@@ -108,6 +108,8 @@ Release packaging is the normal build: it builds SwiftPM, verifies the manual-on
 
 The ready app is `dist/SideBarAI.app`; immutable app/ZIP/signed appcast/notarization records are retained under `dist/releases/<version>/`. Never delete a failed release directory or draft blindly: inspect its recorded Apple submission and GitHub draft before retrying. Build locks prevent concurrent runs. The publisher requires existing Developer ID and app-specific Sparkle signing keys in Keychain, `gh` publication access, and the notary profile. It does not export secrets or grant permissions. Authored source is not included in the app ZIP or public tap. `debug` packaging is explicitly local/ad-hoc and does not publish.
 
+If multiple valid Developer ID certificates exist for the team, set `SIDEBARAI_DEVELOPER_IDENTITY` to the intended 40-character fingerprint from `security find-identity -v -p codesigning`; the publisher verifies that it is currently valid and belongs to the expected team.
+
 Update-key access goes through `scripts/signing.swift`: it disables Keychain interaction before reading the existing key, checks it against the bundle's pinned public key, and passes it only through an anonymous stdin pipe to Sparkle. Missing, locked, approval-required, or mismatched keys fail closed; there is no retry, key generation, rotation, key file, or permission change. Signature verification uses public-only CryptoKit without Keychain access. This helper does not make Developer ID signing or the notarization profile noninteractive; do not resume those stages while their separate no-prompt prerequisite is unresolved.
 
 ### In-app updates

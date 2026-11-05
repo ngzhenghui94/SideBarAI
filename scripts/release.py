@@ -2,6 +2,7 @@
 """Publish one immutable, notarized app and its signed Sparkle feed."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -74,6 +75,24 @@ def info(app):
     return value
 
 
+def select_developer_id_identity(identity_output, requested=None):
+    matches = re.findall(
+        r'\b([0-9A-Fa-f]{40})\s+"Developer ID Application: [^"\n]+ \('
+        + TEAM + r'\)"', identity_output
+    )
+    if requested is None:
+        if len(matches) != 1:
+            reason = "ambiguous" if matches else "missing"
+            raise ValueError(f"Developer ID identity selection is {reason}; expected exactly one valid identity for the existing team")
+        return matches[0]
+    if not re.fullmatch(r"[0-9A-Fa-f]{40}", requested):
+        raise ValueError("SIDEBARAI_DEVELOPER_IDENTITY must be a 40-character hexadecimal fingerprint")
+    selected = [fingerprint for fingerprint in matches if fingerprint.lower() == requested.lower()]
+    if len(selected) != 1:
+        raise ValueError("SIDEBARAI_DEVELOPER_IDENTITY must match exactly one currently valid identity for the existing team")
+    return selected[0]
+
+
 def digest(path):
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -99,6 +118,26 @@ def selftest():
             pass
         else:
             raise AssertionError("Unsafe or exhausted build accepted")
+    identity_a, identity_b = "A" * 40, "B" * 40
+    identities = "\n".join(
+        f' {n}) {fingerprint} "Developer ID Application: Test ({TEAM})"'
+        for n, fingerprint in enumerate((identity_a, identity_b), 1)
+    )
+    assert select_developer_id_identity(identities.splitlines()[0]) == identity_a
+    assert select_developer_id_identity(identities, identity_a) == identity_a
+    try:
+        select_developer_id_identity(identities)
+    except ValueError as error:
+        assert "ambiguous" in str(error)
+    else:
+        raise AssertionError("Ambiguous signing identities were accepted")
+    for requested in ("invalid", "C" * 40):
+        try:
+            select_developer_id_identity(identities, requested)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid signing identity override was accepted")
     from unittest.mock import patch
     failure = subprocess.CompletedProcess((), 1, stderr="OSStatus=-25293")
     with patch("subprocess.run", return_value=failure):
@@ -166,9 +205,7 @@ def main(source, final):
     with (app / "Contents/Info.plist").open("wb") as stream:
         plistlib.dump(staged, stream, sort_keys=False)
     identity_text = run("Signing identity lookup", "security", "find-identity", "-v", "-p", "codesigning")
-    identities = re.findall(r'\b([0-9A-Fa-f]{40})\s+"Developer ID Application: [^"\n]+ \(' + TEAM + r'\)"', identity_text)
-    if len(identities) != 1:
-        raise RuntimeError("Expected exactly one Developer ID identity for the existing team")
+    identity = select_developer_id_identity(identity_text, os.environ.get("SIDEBARAI_DEVELOPER_IDENTITY"))
     binaries = []
     for path in app.rglob("*"):
         if path.is_file() and not path.is_symlink():
@@ -178,7 +215,7 @@ def main(source, final):
     bundles = [p for p in app.rglob("*") if p.is_dir() and not p.is_symlink() and p.suffix in (".framework", ".xpc", ".app")]
     for path in sorted(binaries + bundles, key=lambda p: len(p.parts), reverse=True) + [app]:
         run("Developer ID signing", "codesign", "--force", "--timestamp", "--options", "runtime",
-            "--preserve-metadata=entitlements", "--sign", identities[0], str(path))
+            "--preserve-metadata=entitlements", "--sign", identity, str(path))
     run("Stable signing identity", "codesign", "--verify", "--deep", "--strict", "-R", REQUIREMENT, str(app))
     if run("Release architecture", "lipo", "-archs", str(app / f"Contents/MacOS/{EXECUTABLE}")) != "arm64":
         raise RuntimeError("Expected Apple Silicon release")
