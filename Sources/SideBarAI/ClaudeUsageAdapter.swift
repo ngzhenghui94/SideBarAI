@@ -489,7 +489,8 @@ private struct ClaudeCredentialEnvelope: Decodable, Sendable {
         if let accessToken {
             return ClaudeOAuthCredentials(accessToken: accessToken, expiresAt: expiresAt)
         }
-        return claudeAiOauth
+        // A signed-out stub (empty token) must not shadow the live Keychain login.
+        return nil
     }
 
     private enum CodingKeys: String, CodingKey {

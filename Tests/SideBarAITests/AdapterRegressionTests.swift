@@ -31,6 +31,34 @@ struct AdapterRegressionTests {
     }
 
     @Test
+    func claudeFallsBackToKeychainWhenFileTokenIsEmpty() async throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try write(
+            #"{"claudeAiOauth":{"accessToken":"","subscriptionType":"pro"}}"#,
+            to: home.appendingPathComponent(".claude/.credentials.json")
+        )
+        let defaults = try #require(UserDefaults(suiteName: "claude-empty-file-\(UUID().uuidString)"))
+        defaults.set(true, forKey: "SideBarAI.claudeKeychainAccessEnabled")
+
+        let session = fixtureSession([
+            "/api/oauth/usage": #"{"five_hour":{"utilization":22,"resets_at":"2030-01-07T00:00:00Z"}}"#
+        ])
+        let adapter = ClaudeUsageAdapter(
+            http: UsageHTTPClient(session: session),
+            credentials: LocalCredentialReader(homeDirectoryURL: home),
+            defaults: defaults,
+            keychainReader: { _ in Data(#"{"claudeAiOauth":{"accessToken":"keychain-token"}}"#.utf8) }
+        )
+
+        #expect(adapter.isActive)
+        guard case .usage = await adapter.fetch() else {
+            Issue.record("Expected Keychain login to win over an empty file token")
+            return
+        }
+    }
+
+    @Test
     func claudeDiscoversAndReadsConfigDirAccounts() async throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
